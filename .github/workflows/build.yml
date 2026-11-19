@@ -20,9 +20,14 @@ jobs:
           distribution: 'temurin'
 
       - name: Download libv2ray.aar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p V2rayNG/app/libs
-          curl -L -o V2rayNG/app/libs/libv2ray.aar $(curl -s https://github.com | grep "browser_download_url.*libv2ray.aar" | cut -d '"' -f 4)
+          URL=$(gh release view --repo 2dust/AndroidLibXrayLite --json assets -q '.assets[] | select(.name == "libv2ray.aar") | .url')
+          echo "Downloading from: $URL"
+          curl -fL -H "Authorization: Bearer $GH_TOKEN" -o V2rayNG/app/libs/libv2ray.aar "$URL"
+          ls -lh V2rayNG/app/libs/libv2ray.aar
 
       - name: Grant execute permission for gradlew
         working-directory: ./V2rayNG
