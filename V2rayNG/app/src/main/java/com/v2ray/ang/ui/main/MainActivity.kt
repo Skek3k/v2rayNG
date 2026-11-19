@@ -253,7 +253,7 @@ class MainActivity : AppCompatActivity() {
     private fun startVpnTunnel() {
         if (serverList.isEmpty()) { Toast.makeText(this, "Нет ключей с GitHub", Toast.LENGTH_SHORT).show(); return }
         try {
-            AngConfigManager.importBatchConfig(serverList[currentServerIndex], "", false)
+            AngConfigManager.importBatchConfig(server = serverList[currentServerIndex], subid = "", append = false)
             val guids = MmkvManager.decodeServerList()
             if (guids.isNotEmpty()) MmkvManager.setSelectServer(guids.last())
             CoreServiceManager.startCoreService(this)
