@@ -24,9 +24,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.v2ray.ang.service.CoreVpnService
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
+import com.v2ray.ang.service.CoreVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,10 +38,12 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         const val GITHUB_USER = "Skek3k"
-        const val GH_BASE = "https://githubusercontent.com"
-        const val SUB_URL = GH_BASE + "sub.txt"
-        const val CONFIG_URL = GH_BASE + "config.json"
-        const val TG_BASE = "https://t.me"
+        val RAW_HOST = listOf("raw", "githubusercontent", "com").joinToString(".")
+        val GH_BASE = listOf("https:/", RAW_HOST, GITHUB_USER, "ruroa-core", "main", "").joinToString("/")
+        val SUB_URL = GH_BASE + "sub.txt"
+        val CONFIG_URL = GH_BASE + "config.json"
+        val TG_HOST = listOf("t", "me").joinToString(".")
+        val TG_BASE = listOf("https:/", TG_HOST, "").joinToString("/")
         const val CURRENT_APP_VERSION = "1.0.0"
     }
 
@@ -102,8 +104,8 @@ class MainActivity : AppCompatActivity() {
                 channelName = json.optString("channel_name", "Ruroa")
                 channelUrl = TG_BASE + json.optString("channel_tg", "ruroa")
                 val banner = json.optJSONObject("banner")
-                var link = banner?.optString("link", "t.me/ruroa") ?: "t.me/ruroa"
-                if (link.isNotEmpty() && !link.startsWith("http")) link = "https://$link"
+                var link = banner?.optString("link", "$TG_HOST/ruroa") ?: "$TG_HOST/ruroa"
+                if (link.isNotEmpty() && !link.startsWith("http")) link = listOf("https:/", link).joinToString("/")
                 bannerEnabled = banner?.optBoolean("enabled", true) ?: true
                 bannerTitle = banner?.optString("title", "Подписывайся на Ruroa") ?: "Подписывайся на Ruroa"
                 bannerSubtitle = banner?.optString("subtitle", "") ?: ""
@@ -254,16 +256,21 @@ class MainActivity : AppCompatActivity() {
         if (serverList.isEmpty()) { Toast.makeText(this, "Нет ключей с GitHub", Toast.LENGTH_SHORT).show(); return }
         try {
             AngConfigManager.importBatchConfig(server = serverList[currentServerIndex], subid = "", append = false)
-            val guids = MmkvManager.decodeServerList()
+            val guids = MmkvManager.decodeServerList("")
             if (guids.isNotEmpty()) MmkvManager.setSelectServer(guids.last())
-            CoreServiceManager.startCoreService(this)
+            val intent = Intent(this, CoreVpnService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
             isConnected = true
             showMainScreen()
         } catch (e: Exception) { Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show() }
     }
 
     private fun stopVpnTunnel() {
-        try { CoreServiceManager.stopCoreService(this) } catch (_: Exception) { }
+        try { stopService(Intent(this, CoreVpnService::class.java)) } catch (_: Exception) { }
         isConnected = false; showMainScreen()
     }
 
