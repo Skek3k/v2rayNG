@@ -1,296 +1,345 @@
 package com.v2ray.ang.ui.main
 
-import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.net.VpnService
-import android.os.Build
 import android.os.Bundle
+import android.text.InputFilter
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.service.CoreVpnService
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.URL
-import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    companion object {
-        const val GITHUB_USER = "Skek3k"
-        val RAW_HOST = listOf("raw", "githubusercontent", "com").joinToString(".")
-        val GH_BASE = listOf("https:/", RAW_HOST, GITHUB_USER, "ruroa-core", "main", "").joinToString("/")
-        val SUB_URL = GH_BASE + "sub.txt"
-        val CONFIG_URL = GH_BASE + "config.json"
-        val TG_HOST = listOf("t", "me").joinToString(".")
-        val TG_BASE = listOf("https:/", TG_HOST, "").joinToString("/")
-        const val CURRENT_APP_VERSION = "1.0.0"
-    }
-
-    private var channelName = "Ruroa"
-    private var channelUrl = TG_BASE + "ruroa"
-    private var updateAvailable = false
-    private var bannerEnabled = true
-    private var bannerTitle = "Подписывайся на Ruroa"
-    private var bannerSubtitle = "Свежие обновления и посты"
-    private var bannerButton = "Перейти"
-    private var bannerLink = TG_BASE + "ruroa"
-    private var isConnected = false
+    private val prefsName = "ruroa_prefs"
+    private lateinit var rootContainer: LinearLayout
     private var serverList: List<String> = emptyList()
     private var currentServerIndex = 0
-    private var clickedChannel = false
+    private var isConnected = false
 
-    private val requestVpnPermission = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { if (it.resultCode == RESULT_OK) startVpnTunnel() }
+    private fun getBaseRawUrl(): String {
+        return listOf(
+            "https:/",
+            "://githubusercontent.com",
+            "Skek3k",
+            "ruroa-core",
+            "main"
+        ).joinToString("/")
+    }
 
-    private val requestNotificationPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { }
-
+    private fun getTelegramUrl(): String {
+        return listOf("https:/", "t.me", "ruroa").joinToString("/")
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
-        val prefs = getSharedPreferences("ruroa_prefs", Context.MODE_PRIVATE)
-        var myRefCode = prefs.getString("my_ref_code", null)
-        if (myRefCode == null) {
-            myRefCode = UUID.randomUUID().toString().take(8).uppercase()
-            prefs.edit().putString("my_ref_code", myRefCode).apply()
-        }
-
-        var isRefDone = prefs.getBoolean("ref_activated", false)
-        val data: Uri? = intent?.data
-        if (data != null && data.scheme == "ruroa" && data.host == "invite") {
-            val inviter = data.getQueryParameter("ref")
-            if (!inviter.isNullOrEmpty() && inviter != myRefCode && !isRefDone) {
-                prefs.edit().putBoolean("ref_activated", true).putString("invited_by", inviter).apply()
-                isRefDone = true
-                Toast.makeText(this, "Реферальная ссылка засчитана!", Toast.LENGTH_LONG).show()
-            }
-        }
-
-        val safeCode = myRefCode ?: "RUROA001"
-        renderScreen(prefs, safeCode, prefs.getBoolean("sub_activated", false), isRefDone)
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val json = JSONObject(URL(CONFIG_URL).readText())
-                updateAvailable = json.optString("latest_version", CURRENT_APP_VERSION) != CURRENT_APP_VERSION
-                channelName = json.optString("channel_name", "Ruroa")
-                channelUrl = TG_BASE + json.optString("channel_tg", "ruroa")
-                val banner = json.optJSONObject("banner")
-                var link = banner?.optString("link", "$TG_HOST/ruroa") ?: "$TG_HOST/ruroa"
-                if (link.isNotEmpty() && !link.startsWith("http")) link = listOf("https:/", link).joinToString("/")
-                bannerEnabled = banner?.optBoolean("enabled", true) ?: true
-                bannerTitle = banner?.optString("title", "Подписывайся на Ruroa") ?: "Подписывайся на Ruroa"
-                bannerSubtitle = banner?.optString("subtitle", "") ?: ""
-                bannerButton = banner?.optString("button_text", "Перейти") ?: "Перейти"
-                bannerLink = link
-            } catch (_: Exception) { }
-
-            try {
-                val parsed = URL(SUB_URL).readText().lines().map { it.trim() }.filter { it.startsWith("vless://") }
-                if (parsed.isNotEmpty()) serverList = parsed
-            } catch (_: Exception) { }
-
-            withContext(Dispatchers.Main) {
-                renderScreen(prefs, safeCode, prefs.getBoolean("sub_activated", false), prefs.getBoolean("ref_activated", false))
-            }
-        }
-    }
-    private fun renderScreen(prefs: android.content.SharedPreferences, code: String, sub: Boolean, ref: Boolean) {
-        if (!sub || !ref) showLockScreen(prefs, code, sub, ref) else showMainScreen()
-    }
-
-    private fun showLockScreen(prefs: android.content.SharedPreferences, code: String, sub: Boolean, ref: Boolean) {
-        val root = LinearLayout(this).apply {
+        rootContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#121212"))
-            gravity = Gravity.CENTER
-            setPadding(dp(24), dp(24), dp(24), dp(24))
+            setBackgroundColor(Color.parseColor("#0F1115"))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         }
-        root.addView(TextView(this).apply {
-            text = "Доступ к $channelName"; setTextColor(Color.WHITE); textSize = 24f
-            setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER
-        })
-        root.addView(TextView(this).apply {
-            text = "Выполните 2 обязательных условия для запуска:"; setTextColor(Color.GRAY)
-            textSize = 14f; gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(24))
-        })
-        root.addView(card().apply {
-            addView(TextView(this@MainActivity).apply {
-                text = if (sub) "1. Подписка на @ruroa выполнена" else "1. Подпишитесь на канал @ruroa"
-                setTextColor(if (sub) Color.parseColor("#22C55E") else Color.WHITE)
-                textSize = 16f; setTypeface(null, Typeface.BOLD)
-            })
-            if (!sub) {
-                addView(btn("Открыть канал $channelName", "#38BDF8", Color.BLACK) {
-                    clickedChannel = true; openUrl(channelUrl); renderScreen(prefs, code, false, ref)
-                })
-                if (clickedChannel) addView(btn("Я подписался, проверить", "#334155", Color.WHITE) {
-                    prefs.edit().putBoolean("sub_activated", true).apply(); renderScreen(prefs, code, true, ref)
-                })
-            }
-        })
-        root.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(-1, dp(16)) })
-        root.addView(card().apply {
-            addView(TextView(this@MainActivity).apply {
-                text = if (ref) "2. Реферальная ссылка активирована" else "2. Активируйте реферальную ссылку"
-                setTextColor(if (ref) Color.parseColor("#22C55E") else Color.WHITE)
-                textSize = 16f; setTypeface(null, Typeface.BOLD)
-            })
-            if (!ref) {
-                addView(TextView(this@MainActivity).apply {
-                    text = "Перейдите по ссылке друга или отправьте свою ссылку другу:"
-                    setTextColor(Color.parseColor("#A1A1AA")); textSize = 13f; setPadding(0, dp(6), 0, dp(6))
-                })
-                addView(btn("Скопировать мою реф-ссылку", "#FACC15", Color.BLACK) {
-                    val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cb.setPrimaryClip(ClipData.newPlainText("Ruroa", "ruroa://invite?ref=$code"))
-                    Toast.makeText(this@MainActivity, "Ссылка скопирована!", Toast.LENGTH_SHORT).show()
-                })
-            }
-        })
-        setContentView(root)
+        setContentView(rootContainer)
+        ensureMyReferralCode()
+        renderScreen()
     }
 
-    private fun showMainScreen() {
-        val scroll = ScrollView(this).apply { isFillViewport = true; setBackgroundColor(Color.parseColor("#121212")) }
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(20), dp(24), dp(20), dp(24))
+    private fun ensureMyReferralCode(): String {
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        var code = prefs.getString("my_ref_code", null)
+        if (code.isNullOrEmpty() || code.length != 8) {
+            val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+            code = (1..8).map { chars.random() }.joinToString("")
+            prefs.edit().putString("my_ref_code", code).apply()
         }
-        root.addView(TextView(this).apply {
-            text = channelName; setTextColor(Color.parseColor("#38BDF8")); textSize = 22f
-            setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(16))
-            setOnClickListener { openUrl(channelUrl) }
+        return code
+    }
+
+    private fun renderScreen() {
+        rootContainer.removeAllViews()
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val unlocked = prefs.getBoolean("tg_subscribed", false) &&
+            prefs.getBoolean("ref_activated", false)
+        if (unlocked) buildMainVpnScreen() else buildLockScreen()
+    }
+
+    private fun buildLockScreen() {
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val myCode = ensureMyReferralCode()
+        val tgDone = prefs.getBoolean("tg_subscribed", false)
+        val refDone = prefs.getBoolean("ref_activated", false)
+
+        val scroll = ScrollView(this)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 64, 48, 64)
+        }
+
+        content.addView(TextView(this).apply {
+            text = "Доступ к Ruroa VPN"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
         })
-        if (updateAvailable) {
-            root.addView(LinearLayout(this).apply {
-                background = GradientDrawable().apply { setColor(Color.parseColor("#1E3A8A")); cornerRadius = dp(12).toFloat() }
-                setPadding(dp(14), dp(12), dp(14), dp(12))
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(20) }
-                setOnClickListener { openUrl(channelUrl) }
-                addView(TextView(this@MainActivity).apply {
-                    text = "Доступна новая версия! Скачать в $channelName"; setTextColor(Color.WHITE); textSize = 13f
-                })
-            })
-        }
-        val center = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
-        }
-        val status = TextView(this).apply {
-            text = if (isConnected) "Активен: Быстрый сервер #${currentServerIndex + 1}" else "Нажмите для запуска защиты"
-            setTextColor(Color.GRAY); textSize = 14f; gravity = Gravity.CENTER; setPadding(0, dp(16), 0, dp(12))
-        }
-        center.addView(TextView(this).apply {
-            text = if (isConnected) "ВКЛЮЧЕНО" else "ПОДКЛЮЧИТЬ"; setTextColor(Color.WHITE)
-            textSize = 20f; setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(dp(180), dp(180))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL; setColor(Color.parseColor(if (isConnected) "#22C55E" else "#2563EB"))
+
+        content.addView(TextView(this).apply {
+            text = "Выполните 2 шага для бесплатного доступа:"
+            textSize = 14f
+            setTextColor(Color.parseColor("#9AA4B2"))
+            gravity = Gravity.CENTER
+            setPadding(0, 16, 0, 40)
+        })
+
+        content.addView(TextView(this).apply {
+            text = if (tgDone) "✅ Шаг 1: Подписка оформлена" else "1. Подпишитесь на канал @ruroa"
+            textSize = 16f
+            setTextColor(if (tgDone) Color.parseColor("#4ADE80") else Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 16)
+        })
+
+        content.addView(createStyledButton("Перейти в Telegram-канал", "#2563EB") {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(getTelegramUrl())))
+            } catch (_: Exception) {
+                Toast.makeText(this, "Не удалось открыть Telegram", Toast.LENGTH_SHORT).show()
             }
+            prefs.edit().putBoolean("tg_subscribed", true).apply()
+            renderScreen()
+        })
+        content.addView(TextView(this).apply {
+            text = if (refDone) "✅ Шаг 2: Код активирован" else "2. Пригласите друга или введите его код"
+            textSize = 16f
+            setTextColor(if (refDone) Color.parseColor("#4ADE80") else Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 48, 0, 12)
+        })
+
+        content.addView(TextView(this).apply {
+            text = "Ваш код: $myCode (нажмите, чтобы скопировать)"
+            textSize = 14f
+            setTextColor(Color.parseColor("#38BDF8"))
+            setPadding(0, 0, 0, 20)
+            setOnClickListener {
+                val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cb.setPrimaryClip(ClipData.newPlainText("Ruroa Code", myCode))
+                Toast.makeText(this@MainActivity, "Код $myCode скопирован", Toast.LENGTH_SHORT).show()
+            }
+        })
+
+        content.addView(createStyledButton("Поделиться с другом", "#1E293B") {
+            val shareText = "Попробуй бесплатный VPN Ruroa!\n" +
+                "Канал: ${getTelegramUrl()}\n" +
+                "Мой код активации: $myCode"
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, shareText)
+            }
+            startActivity(Intent.createChooser(sendIntent, "Поделиться"))
+        })
+
+        val codeInput = EditText(this).apply {
+            hint = "Введите 8-значный код друга"
+            setHintTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            gravity = Gravity.CENTER
+            inputType = InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            filters = arrayOf(InputFilter.LengthFilter(8), InputFilter.AllCaps())
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#181C23"))
+                cornerRadius = 24f
+                setStroke(2, Color.parseColor("#334155"))
+            }
+            setPadding(32, 32, 32, 32)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 24 }
+        }
+        content.addView(codeInput)
+
+        val activateBtn = createStyledButton("Активировать", "#16A34A") {
+            val entered = codeInput.text.toString().trim().uppercase()
+            when {
+                entered.length != 8 ->
+                    Toast.makeText(this, "Нужно ровно 8 символов", Toast.LENGTH_SHORT).show()
+                entered == myCode ->
+                    Toast.makeText(this, "Нельзя ввести свой собственный код", Toast.LENGTH_SHORT).show()
+                !entered.all { it.isLetterOrDigit() } ->
+                    Toast.makeText(this, "Только буквы и цифры", Toast.LENGTH_SHORT).show()
+                else -> {
+                    prefs.edit().putBoolean("ref_activated", true).apply()
+                    Toast.makeText(this, "Доступ открыт!", Toast.LENGTH_SHORT).show()
+                    renderScreen()
+                }
+            }
+        }
+        (activateBtn.layoutParams as LinearLayout.LayoutParams).topMargin = 16
+        content.addView(activateBtn)
+
+        scroll.addView(content)
+        rootContainer.addView(scroll)
+    }
+    private fun buildMainVpnScreen() {
+        val mainLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(48, 64, 48, 48)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        mainLayout.addView(TextView(this).apply {
+            text = "RUROA VPN"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+        })
+
+        val statusText = TextView(this).apply {
+            text = if (isConnected) "Статус: Подключено" else "Статус: Отключено"
+            textSize = 15f
+            setTextColor(if (isConnected) Color.parseColor("#4ADE80") else Color.parseColor("#9AA4B2"))
+            setPadding(0, 12, 0, 60)
+        }
+        mainLayout.addView(statusText)
+
+        val connectBtn = Button(this).apply {
+            text = if (isConnected) "ОТКЛЮЧИТЬ" else "ПОДКЛЮЧИТЬ"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(if (isConnected) Color.parseColor("#DC2626") else Color.parseColor("#2563EB"))
+            }
+            layoutParams = LinearLayout.LayoutParams(420, 420).apply { bottomMargin = 48 }
             setOnClickListener {
                 if (!isConnected) {
-                    val i = VpnService.prepare(this@MainActivity)
-                    if (i != null) requestVpnPermission.launch(i) else startVpnTunnel()
-                } else stopVpnTunnel()
+                    if (serverList.isEmpty()) {
+                        Toast.makeText(context, "Загружаем ключи...", Toast.LENGTH_SHORT).show()
+                        fetchServersAndConfig(null)
+                        return@setOnClickListener
+                    }
+                    applySelectedServer()
+                    CoreVpnService.startV2Ray(this@MainActivity)
+                    isConnected = true
+                    text = "ОТКЛЮЧИТЬ"
+                    (background as? GradientDrawable)?.setColor(Color.parseColor("#DC2626"))
+                    statusText.text = "Статус: Подключено"
+                    statusText.setTextColor(Color.parseColor("#4ADE80"))
+                } else {
+                    CoreVpnService.stopV2Ray(this@MainActivity)
+                    isConnected = false
+                    text = "ПОДКЛЮЧИТЬ"
+                    (background as? GradientDrawable)?.setColor(Color.parseColor("#2563EB"))
+                    statusText.text = "Статус: Отключено"
+                    statusText.setTextColor(Color.parseColor("#9AA4B2"))
+                }
             }
-        })
-        center.addView(status)
-        center.addView(btn("Сменить сервер", "#1E293B", Color.WHITE) {
-            if (serverList.isEmpty()) {
-                Toast.makeText(this, "Серверы ещё загружаются...", Toast.LENGTH_SHORT).show()
-            } else {
-                currentServerIndex = (currentServerIndex + 1) % serverList.size
-                status.text = if (isConnected) "Активен: Быстрый сервер #${currentServerIndex + 1}" else "Выбран: Быстрый сервер #${currentServerIndex + 1}"
-                if (isConnected) { stopVpnTunnel(); startVpnTunnel() }
-            }
-        }.apply {
-            layoutParams = LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }
-            setPadding(dp(24), dp(10), dp(24), dp(10))
-        })
-        root.addView(center)
-
-        if (bannerEnabled && bannerTitle.isNotEmpty()) {
-            root.addView(card().apply {
-                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) }
-                setOnClickListener { openUrl(bannerLink) }
-                addView(TextView(this@MainActivity).apply { text = "РЕКЛАМА"; setTextColor(Color.GRAY); textSize = 10f; setTypeface(null, Typeface.BOLD) })
-                addView(TextView(this@MainActivity).apply { text = bannerTitle; setTextColor(Color.WHITE); textSize = 16f; setTypeface(null, Typeface.BOLD); setPadding(0, dp(4), 0, dp(4)) })
-                if (bannerSubtitle.isNotEmpty()) addView(TextView(this@MainActivity).apply { text = bannerSubtitle; setTextColor(Color.parseColor("#A1A1AA")); textSize = 13f })
-                addView(btn(bannerButton, "#38BDF8", Color.BLACK) { openUrl(bannerLink) })
-            })
         }
-        scroll.addView(root)
-        setContentView(scroll)
-    }
+        mainLayout.addView(connectBtn)
 
-    private fun startVpnTunnel() {
-        if (serverList.isEmpty()) { Toast.makeText(this, "Нет ключей с GitHub", Toast.LENGTH_SHORT).show(); return }
-        try {
-            AngConfigManager.importBatchConfig(server = serverList[currentServerIndex], subid = "", append = false)
-            val guids = MmkvManager.decodeServerList("")
-            if (guids.isNotEmpty()) MmkvManager.setSelectServer(guids.last())
-            val intent = Intent(this, CoreVpnService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
+        mainLayout.addView(createStyledButton("Сменить сервер", "#1E293B") {
+            if (serverList.isNotEmpty()) {
+                currentServerIndex = (currentServerIndex + 1) % serverList.size
+                applySelectedServer()
+                Toast.makeText(this, "Сервер #${currentServerIndex + 1}", Toast.LENGTH_SHORT).show()
             }
-            isConnected = true
-            showMainScreen()
-        } catch (e: Exception) { Toast.makeText(this, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show() }
+        })
+
+        mainLayout.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 0, 1f) })
+
+        val bannerText = TextView(this).apply {
+            text = "Загрузка..."
+            textSize = 13f
+            setTextColor(Color.parseColor("#CBD5E1"))
+            gravity = Gravity.CENTER
+            setPadding(24, 24, 24, 24)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#181C23"))
+                cornerRadius = 20f
+            }
+        }
+        mainLayout.addView(bannerText)
+        rootContainer.addView(mainLayout)
+        fetchServersAndConfig(bannerText)
     }
 
-    private fun stopVpnTunnel() {
-        try { stopService(Intent(this, CoreVpnService::class.java)) } catch (_: Exception) { }
-        isConnected = false; showMainScreen()
+    private fun applySelectedServer() {
+        if (serverList.isEmpty()) return
+        AngConfigManager.importBatchConfig(server = serverList[currentServerIndex], subid = "", append = false)
+        val uuids = MmkvManager.decodeServerList("")
+        if (uuids.isNotEmpty()) MmkvManager.setSelectServer(uuids.first())
     }
 
-    private fun openUrl(url: String) {
-        if (url.isNotEmpty()) try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) { }
+    private fun fetchServersAndConfig(bannerView: TextView?) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val base = getBaseRawUrl()
+                val rawSub = URL(listOf(base, "sub.txt").joinToString("/")).readText()
+                val parsed = rawSub.lines().map { it.trim() }.filter { it.startsWith("vless://") }
+                if (parsed.isNotEmpty()) serverList = parsed
+
+                val json = JSONObject(URL(listOf(base, "config.json").joinToString("/")).readText())
+                val adText = json.optString("banner_text", "Наш Telegram: @ruroa")
+                val adLink = json.optString("banner_url", getTelegramUrl())
+
+                withContext(Dispatchers.Main) {
+                    bannerView?.text = adText
+                    bannerView?.setOnClickListener {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(adLink)))
+                    }
+                }
+            } catch (_: Exception) {
+                withContext(Dispatchers.Main) { bannerView?.text = "Канал: @ruroa" }
+            }
+        }
     }
 
-    private fun card() = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = GradientDrawable().apply { setColor(Color.parseColor("#1E1E1E")); cornerRadius = dp(16).toFloat() }
-        setPadding(dp(16), dp(16), dp(16), dp(16))
-        layoutParams = LinearLayout.LayoutParams(-1, -2)
+    private fun createStyledButton(label: String, hexColor: String, onClick: () -> Unit): Button {
+        return Button(this).apply {
+            text = label
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor(hexColor))
+                cornerRadius = 24f
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(24, 28, 24, 28)
+            setOnClickListener { onClick() }
+        }
     }
-
-    private fun btn(label: String, bg: String, tc: Int, click: () -> Unit) = Button(this).apply {
-        text = label; setTextColor(tc); isAllCaps = false; setTypeface(null, Typeface.BOLD)
-        background = GradientDrawable().apply { setColor(Color.parseColor(bg)); cornerRadius = dp(10).toFloat() }
-        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
-        setOnClickListener { click() }
-    }
-
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 }
