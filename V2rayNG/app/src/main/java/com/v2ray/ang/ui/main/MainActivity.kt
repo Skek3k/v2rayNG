@@ -333,8 +333,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (_: Exception) {
-                withContext(Dispatchers.Main) { bannerView?.text = "Канал: @ruroa" }
-            }
+                withContext(Dispatchers.Main) { bannerView?.text = "Канал: @ruroa" }            }
         }
     }
 
