@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.net.VpnService
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputType
@@ -21,10 +22,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.v2ray.ang.AppConfig
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
-import android.net.VpnService
-import com.v2ray.ang.AppConfig
 import com.v2ray.ang.service.CoreVpnService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,18 +42,15 @@ class MainActivity : AppCompatActivity() {
     private var isConnected = false
 
     private fun getBaseRawUrl(): String {
-        return listOf(
-            "https:/",
-            "://githubusercontent.com",
-            "Skek3k",
-            "ruroa-core",
-            "main"
-        ).joinToString("/")
+        val host = listOf("raw", "githubusercontent", "com").joinToString(".")
+        return listOf("https:/", host, "Skek3k", "ruroa-core", "main").joinToString("/")
     }
 
     private fun getTelegramUrl(): String {
-        return listOf("https:/", "t.me", "ruroa").joinToString("/")
+        val host = listOf("t", "me").joinToString(".")
+        return listOf("https:/", host, "ruroa").joinToString("/")
     }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         rootContainer = LinearLayout(this).apply {
@@ -68,7 +65,6 @@ class MainActivity : AppCompatActivity() {
         ensureMyReferralCode()
         renderScreen()
     }
-
     private fun ensureMyReferralCode(): String {
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         var code = prefs.getString("my_ref_code", null)
@@ -243,7 +239,7 @@ class MainActivity : AppCompatActivity() {
                 setColor(if (isConnected) Color.parseColor("#DC2626") else Color.parseColor("#2563EB"))
             }
             layoutParams = LinearLayout.LayoutParams(420, 420).apply { bottomMargin = 48 }
-                        setOnClickListener {
+            setOnClickListener {
                 if (!isConnected) {
                     if (serverList.isEmpty()) {
                         Toast.makeText(context, "Загружаем ключи...", Toast.LENGTH_SHORT).show()
@@ -279,7 +275,8 @@ class MainActivity : AppCompatActivity() {
                     statusText.setTextColor(Color.parseColor("#9AA4B2"))
                 }
             }
-
+        }
+        mainLayout.addView(connectBtn)
 
         mainLayout.addView(createStyledButton("Сменить сервер", "#1E293B") {
             if (serverList.isNotEmpty()) {
@@ -333,7 +330,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (_: Exception) {
-                withContext(Dispatchers.Main) { bannerView?.text = "Канал: @ruroa" }            }
+                withContext(Dispatchers.Main) { bannerView?.text = "Канал: @ruroa" }
+            }
         }
     }
 
