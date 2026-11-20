@@ -23,6 +23,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
+import android.net.VpnService
+import com.v2ray.ang.AppConfig
 import com.v2ray.ang.service.CoreVpnService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -241,22 +243,35 @@ class MainActivity : AppCompatActivity() {
                 setColor(if (isConnected) Color.parseColor("#DC2626") else Color.parseColor("#2563EB"))
             }
             layoutParams = LinearLayout.LayoutParams(420, 420).apply { bottomMargin = 48 }
-            setOnClickListener {
+                        setOnClickListener {
                 if (!isConnected) {
                     if (serverList.isEmpty()) {
                         Toast.makeText(context, "Загружаем ключи...", Toast.LENGTH_SHORT).show()
                         fetchServersAndConfig(null)
                         return@setOnClickListener
                     }
+                    val vpnIntent = VpnService.prepare(this@MainActivity)
+                    if (vpnIntent != null) {
+                        startActivityForResult(vpnIntent, 1001)
+                        return@setOnClickListener
+                    }
                     applySelectedServer()
-                    CoreVpnService.startV2Ray(this@MainActivity)
+                    val intent = Intent(this@MainActivity, CoreVpnService::class.java)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
                     isConnected = true
                     text = "ОТКЛЮЧИТЬ"
                     (background as? GradientDrawable)?.setColor(Color.parseColor("#DC2626"))
                     statusText.text = "Статус: Подключено"
                     statusText.setTextColor(Color.parseColor("#4ADE80"))
                 } else {
-                    CoreVpnService.stopV2Ray(this@MainActivity)
+                    sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
+                        `package` = packageName
+                        putExtra("key", AppConfig.MSG_STATE_STOP)
+                    })
                     isConnected = false
                     text = "ПОДКЛЮЧИТЬ"
                     (background as? GradientDrawable)?.setColor(Color.parseColor("#2563EB"))
@@ -264,8 +279,7 @@ class MainActivity : AppCompatActivity() {
                     statusText.setTextColor(Color.parseColor("#9AA4B2"))
                 }
             }
-        }
-        mainLayout.addView(connectBtn)
+
 
         mainLayout.addView(createStyledButton("Сменить сервер", "#1E293B") {
             if (serverList.isNotEmpty()) {
