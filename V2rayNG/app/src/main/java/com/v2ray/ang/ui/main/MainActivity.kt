@@ -47,11 +47,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getTelegramUrl(): String {
-        val host = listOf("t", "me").joinToString(".")
-        return listOf("https:/", host, "ruroa").joinToString("/")
+        return try {
+            RuroaNative.getChannelUrl()
+        } catch (_: Exception) {
+            val host = listOf("t", "me").joinToString(".")
+            listOf("https:/", host, "ruroa").joinToString("/")
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        RuroaNative.initGuard(this)
         super.onCreate(savedInstanceState)
         rootContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -62,18 +67,28 @@ class MainActivity : AppCompatActivity() {
             )
         }
         setContentView(rootContainer)
+        loadCachedServers()
         ensureMyReferralCode()
         renderScreen()
     }
+
     private fun ensureMyReferralCode(): String {
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         var code = prefs.getString("my_ref_code", null)
-        if (code.isNullOrEmpty() || code.length != 8) {
-            val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-            code = (1..8).map { chars.random() }.joinToString("")
+        if (code.isNullOrEmpty() || code.length != 8 || !RuroaNative.validateReferralCode(code, "")) {
+            code = RuroaNative.generateSignedCode()
             prefs.edit().putString("my_ref_code", code).apply()
         }
         return code
+    }
+
+    private fun loadCachedServers() {
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val cached = prefs.getString("cached_servers", null)
+        if (!cached.isNullOrEmpty()) {
+            val list = cached.lines().map { it.trim() }.filter { it.startsWith("vless://") }
+            if (list.isNotEmpty()) serverList = list
+        }
     }
 
     private fun renderScreen() {
@@ -129,6 +144,7 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean("tg_subscribed", true).apply()
             renderScreen()
         })
+
         content.addView(TextView(this).apply {
             text = if (refDone) "✅ Шаг 2: Код активирован" else "2. Пригласите друга или введите его код"
             textSize = 16f
@@ -159,7 +175,6 @@ class MainActivity : AppCompatActivity() {
             }
             startActivity(Intent.createChooser(sendIntent, "Поделиться"))
         })
-
         val codeInput = EditText(this).apply {
             hint = "Введите 8-значный код друга"
             setHintTextColor(Color.parseColor("#64748B"))
@@ -188,8 +203,8 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Нужно ровно 8 символов", Toast.LENGTH_SHORT).show()
                 entered == myCode ->
                     Toast.makeText(this, "Нельзя ввести свой собственный код", Toast.LENGTH_SHORT).show()
-                !entered.all { it.isLetterOrDigit() } ->
-                    Toast.makeText(this, "Только буквы и цифры", Toast.LENGTH_SHORT).show()
+                !RuroaNative.validateReferralCode(entered, myCode) ->
+                    Toast.makeText(this, "Неверный или несуществующий код", Toast.LENGTH_SHORT).show()
                 else -> {
                     prefs.edit().putBoolean("ref_activated", true).apply()
                     Toast.makeText(this, "Доступ открыт!", Toast.LENGTH_SHORT).show()
@@ -203,6 +218,7 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(content)
         rootContainer.addView(scroll)
     }
+
     private fun buildMainVpnScreen() {
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -316,8 +332,17 @@ class MainActivity : AppCompatActivity() {
             try {
                 val base = getBaseRawUrl()
                 val rawSub = URL(listOf(base, "sub.txt").joinToString("/")).readText()
-                val parsed = rawSub.lines().map { it.trim() }.filter { it.startsWith("vless://") }
-                if (parsed.isNotEmpty()) serverList = parsed
+                val parsed = rawSub.lines()
+                    .map { it.trim() }
+                    .filter { it.startsWith("vless://") && !it.contains("allowInsecure=1", ignoreCase = true) }
+
+                if (parsed.isNotEmpty()) {
+                    serverList = parsed
+                    getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("cached_servers", parsed.joinToString("\n"))
+                        .apply()
+                }
 
                 val json = JSONObject(URL(listOf(base, "config.json").joinToString("/")).readText())
                 val adText = json.optString("banner_text", "Наш Telegram: @ruroa")
