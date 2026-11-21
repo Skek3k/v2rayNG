@@ -83,7 +83,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureSafeRouting() {
         try {
-            MmkvManager.encodeSettings(AppConfig.PREF_BYPASS_MAINLAND, true)
             MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, "https://1.1.1")
             MmkvManager.encodeSettings(AppConfig.PREF_DOMESTIC_DNS, "223.5.5.5")
         } catch (_: Exception) {
