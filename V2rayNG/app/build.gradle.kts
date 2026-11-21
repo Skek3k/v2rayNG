@@ -38,9 +38,25 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     buildTypes {
+        debug {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -78,7 +94,6 @@ android {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         }
     }
-
     applicationVariants.all {
         val variant = this
         val isFdroid = variant.productFlavors.any { it.name == "fdroid" }
@@ -153,10 +168,6 @@ android {
     testOptions {
         unitTests.all {
             it.useJUnitPlatform()
-            // Treat Jupiter discovery warnings as failures: JUnit 4 failed on an invalid @Test
-            // method, such as one that returns a value, while Jupiter only warns and skips it.
-            // The key is @API(status = EXPERIMENTAL) in JUnit 6; after a JUnit upgrade, check
-            // that a temporary `@Test fun probe() = 1` still fails the unit test task.
             it.systemProperty("junit.platform.discovery.issue.severity.critical", "WARNING")
         }
     }
