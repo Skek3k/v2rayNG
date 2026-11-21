@@ -12,6 +12,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputType
+import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -31,6 +32,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URL
 
 class MainActivity : AppCompatActivity() {
@@ -44,6 +47,11 @@ class MainActivity : AppCompatActivity() {
     private fun getBaseRawUrl(): String {
         val host = listOf("raw", "githubusercontent", "com").joinToString(".")
         return listOf("https:/", host, "Skek3k", "ruroa-core", "main").joinToString("/")
+    }
+
+    private fun getMirrorCdnUrl(): String {
+        val host = listOf("cdn", "jsdelivr", "net").joinToString(".")
+        return listOf("https:/", host, "gh", "Skek3k", "ruroa-core@main").joinToString("/")
     }
 
     private fun getTelegramUrl(): String {
@@ -67,9 +75,19 @@ class MainActivity : AppCompatActivity() {
             )
         }
         setContentView(rootContainer)
+        configureSafeRouting()
         loadCachedServers()
         ensureMyReferralCode()
         renderScreen()
+    }
+
+    private fun configureSafeRouting() {
+        try {
+            MmkvManager.encodeSettings(AppConfig.PREF_BYPASS_MAINLAND, true)
+            MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, "https://1.1.1")
+            MmkvManager.encodeSettings(AppConfig.PREF_DOMESTIC_DNS, "223.5.5.5")
+        } catch (_: Exception) {
+        }
     }
 
     private fun ensureMyReferralCode(): String {
@@ -98,7 +116,6 @@ class MainActivity : AppCompatActivity() {
             prefs.getBoolean("ref_activated", false)
         if (unlocked) buildMainVpnScreen() else buildLockScreen()
     }
-
     private fun buildLockScreen() {
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val myCode = ensureMyReferralCode()
@@ -175,6 +192,7 @@ class MainActivity : AppCompatActivity() {
             }
             startActivity(Intent.createChooser(sendIntent, "Поделиться"))
         })
+
         val codeInput = EditText(this).apply {
             hint = "Введите 8-значный код друга"
             setHintTextColor(Color.parseColor("#64748B"))
@@ -218,7 +236,6 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(content)
         rootContainer.addView(scroll)
     }
-
     private fun buildMainVpnScreen() {
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -267,18 +284,7 @@ class MainActivity : AppCompatActivity() {
                         startActivityForResult(vpnIntent, 1001)
                         return@setOnClickListener
                     }
-                    applySelectedServer()
-                    val intent = Intent(this@MainActivity, CoreVpnService::class.java)
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        startForegroundService(intent)
-                    } else {
-                        startService(intent)
-                    }
-                    isConnected = true
-                    text = "ОТКЛЮЧИТЬ"
-                    (background as? GradientDrawable)?.setColor(Color.parseColor("#DC2626"))
-                    statusText.text = "Статус: Подключено"
-                    statusText.setTextColor(Color.parseColor("#4ADE80"))
+                    connectWithAutoServer(this, statusText)
                 } else {
                     sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
                         `package` = packageName
@@ -320,6 +326,54 @@ class MainActivity : AppCompatActivity() {
         fetchServersAndConfig(bannerText)
     }
 
+    private fun isServerAlive(vlessUri: String): Boolean {
+        return try {
+            val afterAt = vlessUri.substringAfter("@", "")
+            val hostPort = afterAt.substringBefore("?").substringBefore("#")
+            val host = hostPort.substringBefore(":")
+            val port = hostPort.substringAfter(":", "443").toIntOrNull() ?: 443
+            if (host.isEmpty()) return false
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), 1500)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun connectWithAutoServer(btn: Button, statusText: TextView) {
+        btn.isEnabled = false
+        statusText.text = "Подбор лучшего сервера..."
+        CoroutineScope(Dispatchers.IO).launch {
+            var chosenIndex = currentServerIndex
+            val total = serverList.size
+            for (step in 0 until minOf(total, 10)) {
+                val idx = (currentServerIndex + step) % total
+                if (isServerAlive(serverList[idx])) {
+                    chosenIndex = idx
+                    break
+                }
+            }
+            currentServerIndex = chosenIndex
+            withContext(Dispatchers.Main) {
+                btn.isEnabled = true
+                applySelectedServer()
+                val intent = Intent(this@MainActivity, CoreVpnService::class.java)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+                isConnected = true
+                btn.text = "ОТКЛЮЧИТЬ"
+                (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#DC2626"))
+                statusText.text = "Статус: Подключено (Сервер #${currentServerIndex + 1})"
+                statusText.setTextColor(Color.parseColor("#4ADE80"))
+            }
+        }
+    }
+
     private fun applySelectedServer() {
         if (serverList.isEmpty()) return
         AngConfigManager.importBatchConfig(server = serverList[currentServerIndex], subid = "", append = false)
@@ -327,35 +381,48 @@ class MainActivity : AppCompatActivity() {
         if (uuids.isNotEmpty()) MmkvManager.setSelectServer(uuids.first())
     }
 
+    private fun decodeSubscription(raw: String): String {
+        val clean = raw.trim()
+        if (clean.contains("vless://")) return clean
+        return try {
+            String(Base64.decode(clean, Base64.DEFAULT), Charsets.UTF_8)
+        } catch (_: Exception) {
+            clean
+        }
+    }
+
     private fun fetchServersAndConfig(bannerView: TextView?) {
         CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val base = getBaseRawUrl()
-                val rawSub = URL(listOf(base, "sub.txt").joinToString("/")).readText()
-                val parsed = rawSub.lines()
-                    .map { it.trim() }
-                    .filter { it.startsWith("vless://") && !it.contains("allowInsecure=1", ignoreCase = true) }
+            val bases = listOf(getBaseRawUrl(), getMirrorCdnUrl())
+            for (base in bases) {
+                try {
+                    val rawSub = URL(listOf(base, "sub.txt").joinToString("/")).readText()
+                    val decodedSub = decodeSubscription(rawSub)
+                    val parsed = decodedSub.lines()
+                        .map { it.trim() }
+                        .filter { it.startsWith("vless://") && !it.contains("allowInsecure=1", ignoreCase = true) }
 
-                if (parsed.isNotEmpty()) {
-                    serverList = parsed
-                    getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-                        .edit()
-                        .putString("cached_servers", parsed.joinToString("\n"))
-                        .apply()
-                }
-
-                val json = JSONObject(URL(listOf(base, "config.json").joinToString("/")).readText())
-                val adText = json.optString("banner_text", "Наш Telegram: @ruroa")
-                val adLink = json.optString("banner_url", getTelegramUrl())
-
-                withContext(Dispatchers.Main) {
-                    bannerView?.text = adText
-                    bannerView?.setOnClickListener {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(adLink)))
+                    if (parsed.isNotEmpty()) {
+                        serverList = parsed
+                        getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("cached_servers", parsed.joinToString("\n"))
+                            .apply()
                     }
+
+                    val json = JSONObject(URL(listOf(base, "config.json").joinToString("/")).readText())
+                    val adText = json.optString("banner_text", "Наш Telegram: @ruroa")
+                    val adLink = json.optString("banner_url", getTelegramUrl())
+
+                    withContext(Dispatchers.Main) {
+                        bannerView?.text = adText
+                        bannerView?.setOnClickListener {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(adLink)))
+                        }
+                    }
+                    break
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
-                withContext(Dispatchers.Main) { bannerView?.text = "Канал: @ruroa" }
             }
         }
     }
