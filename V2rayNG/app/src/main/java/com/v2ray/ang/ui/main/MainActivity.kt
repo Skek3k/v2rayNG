@@ -207,11 +207,18 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
     }
 
+    private fun stopVpnBroadcast() {
+        sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
+            `package` = packageName
+            putExtra("key", AppConfig.MSG_STATE_STOP)
+        })
+    }
+
     private fun onConnectClicked() {
         if (isConnecting) return
 
         if (isConnected) {
-            stopService(Intent(this, CoreVpnService::class.java))
+            stopVpnBroadcast()
             isConnected = false
             updateUiState(false)
             return
@@ -289,8 +296,8 @@ class MainActivity : AppCompatActivity() {
 
                 withContext(Dispatchers.Main) {
                     if (isConnected) {
-                        stopService(Intent(this@MainActivity, CoreVpnService::class.java))
-                        delay(300)
+                        stopVpnBroadcast()
+                        delay(400)
                     }
                     val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -406,9 +413,10 @@ class MainActivity : AppCompatActivity() {
     private fun shareApkFile() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val outApk = File(cacheDir, "Ruroa.apk")
+                val baseDir = externalCacheDir ?: filesDir
+                val outApk = File(baseDir, "Ruroa.apk")
                 File(applicationInfo.sourceDir).copyTo(outApk, overwrite = true)
-                val uri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.cache", outApk)
+                val uri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", outApk)
                 withContext(Dispatchers.Main) {
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "application/vnd.android.package-archive"
