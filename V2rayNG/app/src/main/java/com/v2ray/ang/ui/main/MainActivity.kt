@@ -31,10 +31,23 @@ import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.V2RayServiceManager
 import com.v2ray.ang.ui.BaseActivity
 import com.v2ray.ang.viewmodel.MainViewModel
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import java.net.*
+import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.Socket
+import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
@@ -55,7 +68,7 @@ class MainActivity : BaseActivity() {
     private val failedIndices = mutableSetOf<Int>()
 
     private val primaryUrls by lazy { listOf(RuroaNative.getPrimarySubUrl(), RuroaNative.getCdnSubUrl()) }
-    private val ruBypassPackages = setOf(
+    private val ruBypassPackages = mutableSetOf(
         "ru.sberbankmobile", "com.idamob.tinkoff.android", "ru.alfabank.mobile.android",
         "ru.vtb24.mobilebanking.android", "ru.gazprombank.android.mobilebank.app",
         "ru.raiffeisennews", "ru.sovcomcard.halva.v1", "ru.psbank.mobile",
@@ -166,7 +179,7 @@ class MainActivity : BaseActivity() {
         MmkvManager.encodeSettings(AppConfig.PREF_BYPASS_APPS, true)
         if (next) {
             val current = MmkvManager.decodeSettingsStringSet(AppConfig.PREF_PER_APP_PROXY_SET) ?: emptySet()
-            MmkvManager.encodeSettings(AppConfig.PREF_PER_APP_PROXY_SET, current + ruBypassPackages)
+            MmkvManager.encodeSettings(AppConfig.PREF_PER_APP_PROXY_SET, (current + ruBypassPackages).toMutableSet())
         }
         refreshBypassButtonText()
         if (mainViewModel.isRunning.value == true) V2RayServiceManager.restartV2Ray(this)
