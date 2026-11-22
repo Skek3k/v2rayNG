@@ -246,7 +246,9 @@ class MainActivity : BaseActivity() {
                     failedIndices.clear()
                     val rawSub = fetchNodesWithFallback()
                     if (!rawSub.isNullOrBlank()) {
-                        MmkvManager.removeAllServer(); AngConfigManager.importBatchConfig(rawSub, "", false); currentServerIndex = 0
+                        MmkvManager.removeAllServer()
+                        AngConfigManager.importBatchConfig(rawSub, "", false, "")
+                        currentServerIndex = 0
                     }
                 }
                 val serverList = MmkvManager.decodeServerList()
