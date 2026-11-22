@@ -226,7 +226,7 @@ class MainActivity : BaseActivity() {
 
     private fun switchToNextServer() {
         if (isConnecting) return
-        val serverList = MmkvManager.decodeServerList()
+        val serverList = MmkvManager.decodeServerList("")
         if (serverList.isEmpty()) { connectWithAutoServer(); return }
         failedIndices.add(currentServerIndex)
         currentServerIndex = (currentServerIndex + 1) % serverList.size
@@ -247,11 +247,11 @@ class MainActivity : BaseActivity() {
                     val rawSub = fetchNodesWithFallback()
                     if (!rawSub.isNullOrBlank()) {
                         MmkvManager.removeAllServer()
-                        AngConfigManager.importBatchConfig(rawSub, "", false, "")
+                        AngConfigManager.importBatchConfig(rawSub, "", false)
                         currentServerIndex = 0
                     }
                 }
-                val serverList = MmkvManager.decodeServerList()
+                val serverList = MmkvManager.decodeServerList("")
                 if (serverList.isEmpty()) {
                     withContext(Dispatchers.Main) { isConnecting = false; updateUiState(false); tvStatusSub.text = "Узлы недоступны. Проверьте интернет" }
                     return@launch
