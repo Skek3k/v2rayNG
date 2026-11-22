@@ -1,5 +1,6 @@
 package com.v2ray.ang.ui.main
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -27,6 +28,7 @@ import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
+import java.net.URLDecoder
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private var serverList: List<String> = emptyList()
     private var currentServerIndex = 0
     private var isConnected = false
+    private var nodeInfoText: TextView? = null
 
     private fun getBaseRawUrl(): String {
         val host = listOf("raw", "githubusercontent", "com").joinToString(".")
@@ -88,6 +91,25 @@ class MainActivity : AppCompatActivity() {
             if (list.isNotEmpty()) serverList = list
         }
     }
+
+    private fun getServerDisplayName(index: Int): String {
+        if (serverList.isEmpty() || index !in serverList.indices) return "Узел не выбран"
+        val rawTag = serverList[index].substringAfter("#", "")
+        if (rawTag.isEmpty()) return "Узел #${index + 1}"
+        return try {
+            URLDecoder.decode(rawTag, "UTF-8")
+        } catch (_: Exception) {
+            rawTag
+        }
+    }
+
+    private fun updateNodeBanner() {
+        nodeInfoText?.text = if (serverList.isEmpty()) {
+            "Загрузка списка узлов..."
+        } else {
+            "Текущий узел: ${getServerDisplayName(currentServerIndex)}"
+        }
+    }
     private fun buildMainScreen() {
         rootContainer.removeAllViews()
         val mainLayout = LinearLayout(this).apply {
@@ -118,7 +140,7 @@ class MainActivity : AppCompatActivity() {
             text = if (isConnected) "Статус: Защищено" else "Статус: Отключено"
             textSize = 15f
             setTextColor(if (isConnected) Color.parseColor("#4ADE80") else Color.parseColor("#9AA4B2"))
-            setPadding(0, 16, 0, 64)
+            setPadding(0, 16, 0, 52)
         }
         mainLayout.addView(statusText)
 
@@ -131,7 +153,7 @@ class MainActivity : AppCompatActivity() {
                 shape = GradientDrawable.OVAL
                 setColor(if (isConnected) Color.parseColor("#DC2626") else Color.parseColor("#2563EB"))
             }
-            layoutParams = LinearLayout.LayoutParams(420, 420).apply { bottomMargin = 56 }
+            layoutParams = LinearLayout.LayoutParams(420, 420).apply { bottomMargin = 44 }
             setOnClickListener {
                 if (!isConnected) {
                     if (serverList.isEmpty()) {
@@ -146,29 +168,34 @@ class MainActivity : AppCompatActivity() {
                     }
                     connectWithAutoServer(this, statusText)
                 } else {
-                    sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
-                        `package` = packageName
-                        putExtra("key", AppConfig.MSG_STATE_STOP)
-                    })
-                    isConnected = false
-                    text = "ПОДКЛЮЧИТЬ"
-                    (background as? GradientDrawable)?.setColor(Color.parseColor("#2563EB"))
-                    statusText.text = "Статус: Отключено"
-                    statusText.setTextColor(Color.parseColor("#9AA4B2"))
+                    stopVpnService(this, statusText)
                 }
             }
         }
         mainLayout.addView(connectBtn)
 
-        mainLayout.addView(createStyledButton("Сменить узел", "#1E293B") {
-            if (serverList.isNotEmpty()) {
-                currentServerIndex = (currentServerIndex + 1) % serverList.size
-                applySelectedServer()
-                Toast.makeText(this, "Выбран узел #${currentServerIndex + 1}", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Список узлов загружается...", Toast.LENGTH_SHORT).show()
-                fetchServers()
+        val currentNodeCard = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.parseColor("#E2E8F0"))
+            gravity = Gravity.CENTER
+            setPadding(28, 28, 28, 28)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#181C23"))
+                cornerRadius = 24f
+                setStroke(2, Color.parseColor("#2A313D"))
             }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = 20 }
+            setOnClickListener { showServerPickerDialog(connectBtn, statusText) }
+        }
+        nodeInfoText = currentNodeCard
+        updateNodeBanner()
+        mainLayout.addView(currentNodeCard)
+
+        mainLayout.addView(createStyledButton("Выбрать узел из списка", "#1E293B") {
+            showServerPickerDialog(connectBtn, statusText)
         })
 
         mainLayout.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 0, 1f) })
@@ -185,6 +212,61 @@ class MainActivity : AppCompatActivity() {
 
         rootContainer.addView(mainLayout)
         fetchServers()
+    }
+
+    private fun showServerPickerDialog(connectBtn: Button, statusText: TextView) {
+        if (serverList.isEmpty()) {
+            Toast.makeText(this, "Список узлов ещё загружается...", Toast.LENGTH_SHORT).show()
+            fetchServers()
+            return
+        }
+        val items = serverList.indices.map { i ->
+            "${i + 1}. ${getServerDisplayName(i)}"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Выберите узел (${serverList.size})")
+            .setSingleChoiceItems(items, currentServerIndex) { dialog, which ->
+                currentServerIndex = which
+                updateNodeBanner()
+                applySelectedServer()
+                dialog.dismiss()
+                if (isConnected) {
+                    stopVpnService(connectBtn, statusText)
+                    startVpnDirect(connectBtn, statusText)
+                } else {
+                    Toast.makeText(this, "Выбрано: ${getServerDisplayName(which)}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+    private fun startVpnDirect(btn: Button, statusText: TextView) {
+        applySelectedServer()
+        val intent = Intent(this, CoreVpnService::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        isConnected = true
+        btn.text = "ОТКЛЮЧИТЬ"
+        (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#DC2626"))
+        statusText.text = "Статус: Защищено"
+        statusText.setTextColor(Color.parseColor("#4ADE80"))
+        updateNodeBanner()
+    }
+
+    private fun stopVpnService(btn: Button, statusText: TextView) {
+        sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
+            `package` = packageName
+            putExtra("key", AppConfig.MSG_STATE_STOP)
+        })
+        isConnected = false
+        btn.text = "ПОДКЛЮЧИТЬ"
+        (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#2563EB"))
+        statusText.text = "Статус: Отключено"
+        statusText.setTextColor(Color.parseColor("#9AA4B2"))
     }
 
     private fun isServerAlive(vlessUri: String): Boolean {
@@ -219,18 +301,7 @@ class MainActivity : AppCompatActivity() {
             currentServerIndex = chosenIndex
             withContext(Dispatchers.Main) {
                 btn.isEnabled = true
-                applySelectedServer()
-                val intent = Intent(this@MainActivity, CoreVpnService::class.java)
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    startForegroundService(intent)
-                } else {
-                    startService(intent)
-                }
-                isConnected = true
-                btn.text = "ОТКЛЮЧИТЬ"
-                (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#DC2626"))
-                statusText.text = "Статус: Защищено (Узел #${currentServerIndex + 1})"
-                statusText.setTextColor(Color.parseColor("#4ADE80"))
+                startVpnDirect(btn, statusText)
             }
         }
     }
@@ -269,6 +340,9 @@ class MainActivity : AppCompatActivity() {
                             .edit()
                             .putString("cached_servers", parsed.joinToString("\n"))
                             .apply()
+                        withContext(Dispatchers.Main) {
+                            updateNodeBanner()
+                        }
                         break
                     }
                 } catch (_: Exception) {
