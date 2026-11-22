@@ -191,7 +191,6 @@ class MainActivity : BaseActivity() {
         btnBypassRu.text = if (enabled) "● РФ-сервисы и банки: напрямую" else "○ РФ-сервисы и банки: через узел"
         btnBypassRu.setTextColor(Color.parseColor(if (enabled) "#3FB950" else "#8B949E"))
     }
-
     private fun setupViewModel() {
         mainViewModel.isRunning.observe(this) { running ->
             if (!isConnecting) updateUiState(running)
@@ -228,6 +227,7 @@ class MainActivity : BaseActivity() {
         val code = conn.responseCode; conn.disconnect()
         code == 204 || code == 200
     } catch (_: Exception) { false }
+
     private fun onConnectClicked() {
         if (isConnecting) return
         if (mainViewModel.isRunning.value == true) {
@@ -299,7 +299,6 @@ class MainActivity : BaseActivity() {
             }
         }
     }
-
     private suspend fun findFirstAliveInBatch(serverList: List<String>, indices: List<Int>): Triple<Int, String, String>? = coroutineScope {
         val channel = Channel<Triple<Int, String, String>>(Channel.UNLIMITED)
         val pending = AtomicInteger(indices.size)
