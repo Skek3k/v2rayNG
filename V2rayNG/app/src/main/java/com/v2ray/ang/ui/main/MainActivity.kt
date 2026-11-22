@@ -24,8 +24,8 @@ import androidx.activity.viewModels
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.v2ray.ang.AppConfig
-import com.v2ray.ang.dto.EConfigType
-import com.v2ray.ang.dto.ProfileItem
+import com.v2ray.ang.dto.entities.ProfileItem
+import com.v2ray.ang.dto.enums.EConfigType
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.V2RayServiceManager
@@ -112,7 +112,6 @@ class MainActivity : BaseActivity() {
             requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-// === КОНЕЦ ЧАСТИ 1 ===
     @SuppressLint("SetTextI18n")
     private fun setupMinimalUi() {
         val root = FrameLayout(this).apply {
@@ -219,7 +218,6 @@ class MainActivity : BaseActivity() {
 
         setContentView(root)
     }
-// === КОНЕЦ ЧАСТИ 2 ===
     private fun setupViewModel() {
         mainViewModel.isRunning.observe(this) { running ->
             if (!isConnecting) {
@@ -288,7 +286,7 @@ class MainActivity : BaseActivity() {
 
     private fun switchToNextServer() {
         if (isConnecting) return
-        val serverList = MmkvManager.decodeServerList("")
+        val serverList = MmkvManager.decodeServerList()
         if (serverList.isEmpty()) {
             connectWithAutoServer()
             return
@@ -297,7 +295,7 @@ class MainActivity : BaseActivity() {
         currentServerIndex = (currentServerIndex + 1) % serverList.size
         connectWithAutoServer(useExistingList = true)
     }
-// === КОНЕЦ ЧАСТИ 3 ===
+
     @SuppressLint("SetTextI18n")
     private fun connectWithAutoServer(useExistingList: Boolean = false) {
         isConnecting = true
@@ -320,7 +318,7 @@ class MainActivity : BaseActivity() {
                     }
                 }
 
-                val serverList = MmkvManager.decodeServerList("")
+                val serverList = MmkvManager.decodeServerList()
                 if (serverList.isEmpty()) {
                     withContext(Dispatchers.Main) {
                         isConnecting = false
@@ -377,12 +375,11 @@ class MainActivity : BaseActivity() {
             }
         }
     }
-
     private fun isServerAlive(config: ProfileItem): Boolean {
         if (config.configType == EConfigType.CUSTOM) return true
         val host = config.server ?: return false
         val port = config.serverPort?.toIntOrNull() ?: return false
-        val sni = config.sni?.takeIf { it.isNotBlank() } ?: host
+        val sni = config.serverName?.takeIf { it.isNotBlank() } ?: host
         val isTls = config.security.equals("reality", true) || config.security.equals("tls", true)
         return try {
             Socket().use { sock ->
