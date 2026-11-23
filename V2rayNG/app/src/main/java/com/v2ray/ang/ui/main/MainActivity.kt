@@ -15,7 +15,6 @@ import android.os.Bundle
 import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -99,7 +98,7 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!RuroaNative.verifyIntegrity(this)) {
+        if (!RuroaNative.verifyEnvironment(this)) {
             finish()
             return
         }
@@ -265,7 +264,6 @@ class MainActivity : AppCompatActivity() {
                 MmkvManager.setSelectServer(uuids.first())
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
-                MmkvManager.encodeSettings(AppConfig.PREF_ROUTING_MODE, "0")
                 withContext(Dispatchers.Main) {
                     val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -482,7 +480,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupRussianBypassOnce() {
         val prefs = getSharedPreferences("ruroa_prefs", MODE_PRIVATE)
         if (prefs.getBoolean("bypass_init_v2", false)) return
-        val bypassPkgs = setOf(
+        val bypassPkgs = mutableSetOf(
             "ru.sberbankmobile", "com.idamob.tinkoff.android", "ru.vtb24.mobilebanking.android",
             "ru.alfabank.mobile.android", "ru.gazprombank.android.mobilebank.app",
             "ru.raiffeisennews", "ru.ozon.app.android", "com.wildberries.ru",
