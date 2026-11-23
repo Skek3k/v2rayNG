@@ -265,9 +265,10 @@ class MainActivity : AppCompatActivity() {
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
                 withContext(Dispatchers.Main) {
-                    val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java).apply {
-                        action = AppConfig.ACTION_START
+                                        val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java).apply {
+                        action = "${packageName}.action.start"
                     }
+
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(svcIntent)
                     } else {
@@ -289,9 +290,10 @@ class MainActivity : AppCompatActivity() {
         isConnecting = false
         updateUiState()
         try {
-            val stopIntent = Intent(this, CoreVpnService::class.java).apply {
-                action = AppConfig.ACTION_STOP
+                        val stopIntent = Intent(this, CoreVpnService::class.java).apply {
+                action = "${packageName}.action.stop"
             }
+
             startService(stopIntent)
         } catch (_: Exception) {
         }
