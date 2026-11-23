@@ -1,24 +1,25 @@
 package com.v2ray.ang.ui.main
 
-import android.Manifest
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
-import android.content.res.ColorStateList
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.text.TextUtils
 import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
-import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
@@ -27,9 +28,9 @@ import com.v2ray.ang.AppConfig
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.service.CoreVpnService
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -37,413 +38,491 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
-import java.net.URLDecoder
 
 class MainActivity : AppCompatActivity() {
 
+    private data class ServerNode(
+        val rawUri: String,
+        val title: String,
+        val pingMs: Int
+    )
+
     private lateinit var btnConnect: TextView
-    private lateinit var tvStatusTitle: TextView
-    private lateinit var tvStatusSub: TextView
-    private lateinit var btnSwitchServer: TextView
+    private lateinit var tvStatus: TextView
+    private lateinit var tvServer: TextView
+    private lateinit var btnSwitch: TextView
+    private lateinit var btnShare: TextView
+    private lateinit var listContainer: LinearLayout
 
     private var isConnected = false
     private var isConnecting = false
-    private var rawKeys: List<String> = emptyList()
-    private var currentServerIndex = 0
-
-    private val primaryUrls by lazy {
-        listOf(
-            RuroaNative.getPrimarySubUrl(),
-            RuroaNative.getCdnSubUrl()
-        )
-    }
-
-    private val ruBypassPackages = mutableSetOf(
-        "ru.sberbankmobile", "com.idamob.tinkoff.android", "ru.alfabank.mobile.android",
-        "ru.vtb24.mobilebanking.android", "ru.gazprombank.android.mobilebank.app",
-        "ru.raiffeisennews", "ru.sovcomcard.halva.v1", "ru.psbank.mobile",
-        "ru.rostel", "ru.gosuslugi.pos", "ru.nalog.lkfl", "ru.russianpost.client.android",
-        "ru.ozon.app.android", "com.wildberries.ru", "ru.beru.android",
-        "ru.yandex.taxi", "ru.yandex.searchplugin", "ru.yandex.yandexmaps",
-        "com.vkontakte.android", "ru.ok.android", "ru.avito", "ru.kinopoisk"
-    )
-
-    private val requestVpnPermission = registerForActivityResult(
+    private var nodes: List<ServerNode> = emptyList()
+    private var currentIndex = 0
+    private val vpnPermLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            connectWithAutoServer()
+    ) { res ->
+        if (res.resultCode == RESULT_OK) {
+            launchSelectedNode()
         } else {
             isConnecting = false
-            updateUiState(false)
+            updateUiState()
         }
     }
 
-    private val requestNotificationPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { _ -> }
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val key = intent?.getIntExtra("key", 0) ?: return
+            when (key) {
+                AppConfig.MSG_STATE_RUNNING,
+                AppConfig.MSG_STATE_START_SUCCESS -> {
+                    isConnected = true
+                    isConnecting = false
+                    updateUiState()
+                }
+                AppConfig.MSG_STATE_STOP_SUCCESS,
+                AppConfig.MSG_STATE_START_FAILURE -> {
+                    isConnected = false
+                    isConnecting = false
+                    updateUiState()
+                    if (key == AppConfig.MSG_STATE_START_FAILURE) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Не удалось запустить узел, попробуйте другой",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+        }
+    }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!RuroaNative.verifyAppIntegrity(this)) {
-            finishAffinity()
+        if (!RuroaNative.verifyIntegrity(this)) {
+            finish()
             return
         }
-        setupMinimalUi()
-        if (!MmkvManager.decodeSettingsBool("ruroa_bypass_init", false)) {
-            MmkvManager.encodeSettings("ruroa_bypass_init", true)
-            MmkvManager.encodeSettings(AppConfig.PREF_PER_APP_PROXY, true)
-            MmkvManager.encodeSettings(AppConfig.PREF_BYPASS_APPS, true)
-            MmkvManager.encodeSettings(AppConfig.PREF_PER_APP_PROXY_SET, ruBypassPackages)
-        }
+        setupRussianBypassOnce()
+        ensureGeoAssets()
+        buildUi()
+        val filter = IntentFilter(AppConfig.BROADCAST_ACTION_ACTIVITY)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            registerReceiver(stateReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(stateReceiver, filter)
         }
+        refreshServers(autoConnect = false)
     }
-    @SuppressLint("SetTextI18n")
-    private fun setupMinimalUi() {
-        val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#0D1117"))
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
 
-        val centerBox = LinearLayout(this).apply {
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(stateReceiver)
+        } catch (_: Exception) {
+        }
+        super.onDestroy()
+    }
+    private fun buildUi() {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#0D1117"))
+            setPadding(dp(20), dp(28), dp(20), dp(20))
             gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER
-            )
-            setPadding(dp(24), dp(24), dp(24), dp(24))
         }
 
-        val tvLogo = TextView(this).apply {
+        val title = TextView(this).apply {
             text = "RUROA"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            letterSpacing = 0.25f
-            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.15f
         }
-        centerBox.addView(tvLogo)
+        root.addView(title)
 
-        val btnSize = dp(186)
+        tvStatus = TextView(this).apply {
+            text = "Отключено"
+            setTextColor(Color.parseColor("#8B949E"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, dp(6), 0, dp(20))
+        }
+        root.addView(tvStatus)
+
         btnConnect = TextView(this).apply {
             text = "ПОДКЛЮЧИТЬ"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = createCircleDrawable("#161B22", "#30363D", dp(3))
-            elevation = dp(12).toFloat()
-            layoutParams = LinearLayout.LayoutParams(btnSize, btnSize).apply {
-                topMargin = dp(42)
-                bottomMargin = dp(28)
-            }
+            background = roundBg("#1F6FEB", 16)
+            setPadding(dp(24), dp(16), dp(24), dp(16))
             setOnClickListener { onConnectClicked() }
         }
-        centerBox.addView(btnConnect)
+        root.addView(btnConnect, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
-        tvStatusTitle = TextView(this).apply {
-            text = "Защита отключена"
-            setTextColor(Color.parseColor("#8B949E"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            typeface = Typeface.DEFAULT_BOLD
+        tvServer = TextView(this).apply {
+            text = "Загрузка узлов..."
+            setTextColor(Color.parseColor("#C9D1D9"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(14), 0, dp(10))
+        }
+        root.addView(tvServer)
+
+        val rowActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        centerBox.addView(tvStatusTitle)
-
-        tvStatusSub = TextView(this).apply {
-            text = "Нажмите кнопку для безопасного соединения"
-            setTextColor(Color.parseColor("#6E7681"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(6) }
-        }
-        centerBox.addView(tvStatusSub)
-
-        btnSwitchServer = TextView(this).apply {
-            text = "↻ Сменить узел"
+        btnSwitch = TextView(this).apply {
+            text = "↻ Автовыбор"
             setTextColor(Color.parseColor("#58A6FF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(20), dp(10), dp(20), dp(10))
-            background = createRoundRectDrawable("#161B22", "#30363D", dp(1), dp(20))
-            visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(22) }
-            setOnClickListener { switchToNextServer() }
+            background = roundBg("#161B22", 10)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setOnClickListener { switchBestNode() }
         }
-        centerBox.addView(btnSwitchServer)
-
-        root.addView(centerBox)
-
-        val btnShare = TextView(this).apply {
+        btnShare = TextView(this).apply {
             text = "Поделиться APK"
-            setTextColor(Color.parseColor("#8B949E"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            gravity = Gravity.CENTER
-            setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = createRoundRectDrawable("#161B22", "#21262D", dp(1), dp(16))
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            ).apply { bottomMargin = dp(28) }
+            setTextColor(Color.parseColor("#C9D1D9"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            background = roundBg("#161B22", 10)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
             setOnClickListener { shareApkFile() }
         }
-        root.addView(btnShare)
+        val lpBtn = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        rowActions.addView(btnSwitch, LinearLayout.LayoutParams(lpBtn).apply { marginEnd = dp(8) })
+        rowActions.addView(btnShare, LinearLayout.LayoutParams(lpBtn).apply { marginStart = dp(8) })
+        root.addView(rowActions, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        val listHeader = TextView(this).apply {
+            text = "Доступные серверы (по пингу)"
+            setTextColor(Color.parseColor("#8B949E"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(16), 0, dp(8))
+        }
+        root.addView(listHeader, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        val scroll = ScrollView(this)
+        listContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scroll.addView(listContainer)
+        root.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ))
 
         setContentView(root)
     }
-
-    private fun stopVpnBroadcast() {
-        sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
-            `package` = packageName
-            putExtra("key", AppConfig.MSG_STATE_STOP)
-        })
-    }
-
     private fun onConnectClicked() {
         if (isConnecting) return
-
         if (isConnected) {
-            stopVpnBroadcast()
-            isConnected = false
-            updateUiState(false)
+            stopVpnService()
             return
         }
-
-        val vpnIntent = VpnService.prepare(this)
-        if (vpnIntent != null) {
-            requestVpnPermission.launch(vpnIntent)
-        } else {
-            connectWithAutoServer()
-        }
-    }
-
-    private fun switchToNextServer() {
-        if (isConnecting) return
-        if (rawKeys.isEmpty()) {
-            connectWithAutoServer()
+        if (nodes.isEmpty()) {
+            refreshServers(autoConnect = true)
             return
         }
-        currentServerIndex = (currentServerIndex + 1) % rawKeys.size
-        connectWithAutoServer(useExistingList = true)
+        startVpnFlow()
     }
-    @SuppressLint("SetTextI18n")
-    private fun connectWithAutoServer(useExistingList: Boolean = false) {
+
+    private fun startVpnFlow() {
         isConnecting = true
-        btnConnect.text = "ПОИСК..."
-        btnConnect.background = createCircleDrawable("#1F2937", "#D29922", dp(3))
-        tvStatusTitle.text = "Подбор лучшего узла"
-        tvStatusTitle.setTextColor(Color.parseColor("#D29922"))
-        tvStatusSub.text = "Проверка доступных каналов..."
-        btnSwitchServer.visibility = View.GONE
+        updateUiState()
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            vpnPermLauncher.launch(intent)
+        } else {
+            launchSelectedNode()
+        }
+    }
 
+    private fun launchSelectedNode() {
+        val node = nodes.getOrNull(currentIndex) ?: return
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                if (!useExistingList || rawKeys.isEmpty()) {
-                    val rawSub = fetchSubscriptionWithFallback()
-                    if (!rawSub.isNullOrBlank()) {
-                        rawKeys = rawSub.lines().map { it.trim() }.filter { it.startsWith("vless://", true) }
-                        currentServerIndex = 0
-                    }
-                }
-
-                if (rawKeys.isEmpty()) {
+                MmkvManager.removeAllServer()
+                AngConfigManager.importBatchConfig(server = node.rawUri, subid = "", append = false)
+                val uuids = MmkvManager.decodeServerList("")
+                if (uuids.isEmpty()) {
                     withContext(Dispatchers.Main) {
                         isConnecting = false
-                        updateUiState(false)
-                        tvStatusSub.text = "Узлы недоступны. Проверьте интернет"
+                        updateUiState()
+                        Toast.makeText(this@MainActivity, "Ошибка импорта узла", Toast.LENGTH_SHORT).show()
                     }
                     return@launch
                 }
-
-                var chosenKey = rawKeys[currentServerIndex % rawKeys.size]
-                val total = rawKeys.size
-
-                for (i in 0 until total) {
-                    val idx = (currentServerIndex + i) % total
-                    val candidate = rawKeys[idx]
-                    if (isVlessUrlAlive(candidate)) {
-                        currentServerIndex = idx
-                        chosenKey = candidate
-                        break
-                    }
-                }
-
-                val selectedName = extractNodeTitle(chosenKey)
-
-                MmkvManager.removeAllServer()
-                AngConfigManager.importBatchConfig(server = chosenKey, subid = "", append = false)
-                val uuids = MmkvManager.decodeServerList("")
-                if (uuids.isNotEmpty()) {
-                    MmkvManager.setSelectServer(uuids.first())
-                }
-                MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, "https://1.1.1")
-                MmkvManager.encodeSettings(AppConfig.PREF_DOMESTIC_DNS, "223.5.5.5")
-
+                MmkvManager.setSelectServer(uuids.first())
+                val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
+                MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
+                MmkvManager.encodeSettings(AppConfig.PREF_ROUTING_MODE, "0")
                 withContext(Dispatchers.Main) {
-                    if (isConnected) {
-                        stopVpnBroadcast()
-                        delay(400)
-                    }
                     val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(svcIntent)
                     } else {
                         startService(svcIntent)
                     }
-                    delay(1000)
-                    isConnected = true
-                    isConnecting = false
-                    updateUiState(true, selectedName)
                 }
-            } catch (_: CancellationException) {
-                isConnecting = false
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     isConnecting = false
-                    updateUiState(false)
-                    tvStatusSub.text = "Сбой соединения. Попробуйте ещё раз"
+                    updateUiState()
+                    Toast.makeText(this@MainActivity, "Сбой запуска: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
-    private fun isVlessUrlAlive(vlessUrl: String): Boolean {
-        return try {
-            val withoutScheme = vlessUrl.substringAfter("://").substringBefore("#").substringBefore("?")
-            val hostPort = withoutScheme.substringAfter("@")
-            val host = hostPort.substringBefore(":")
-            val port = hostPort.substringAfter(":").toIntOrNull() ?: return false
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), 1500)
-                true
-            }
-        } catch (_: Exception) {
-            false
+    private fun stopVpnService() {
+        isConnected = false
+        isConnecting = false
+        updateUiState()
+        sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
+            `package` = packageName
+            putExtra("key", AppConfig.MSG_STATE_STOP)
+        })
+    }
+
+    private fun switchBestNode() {
+        if (nodes.isEmpty()) {
+            refreshServers(autoConnect = isConnected)
+            return
+        }
+        currentIndex = (currentIndex + 1) % nodes.size
+        renderServerList()
+        if (isConnected) {
+            stopVpnService()
+            startVpnFlow()
         }
     }
 
-    private fun extractNodeTitle(vlessUrl: String): String {
-        val rawTag = vlessUrl.substringAfter("#", "")
-        if (rawTag.isBlank()) return "Оптимальный узел"
-        return try {
-            URLDecoder.decode(rawTag, "UTF-8").ifBlank { "Оптимальный узел" }
-        } catch (_: Exception) {
-            rawTag
-        }
-    }
+    private fun refreshServers(autoConnect: Boolean) {
+        tvServer.text = "Поиск быстрых серверов..."
+        lifecycleScope.launch(Dispatchers.IO) {
+            val rawLines = fetchSubscriptionLines()
+            val tested = rawLines.take(30).map { line ->
+                async {
+                    val ms = measureTcpPing(line)
+                    if (ms in 1..1500) ServerNode(line, parseNodeTitle(line), ms) else null
+                }
+            }.awaitAll().filterNotNull().sortedBy { it.pingMs }
 
-    private fun fetchSubscriptionWithFallback(): String? {
-        for (url in primaryUrls) {
-            val content = downloadText(url)
-            if (!content.isNullOrBlank()) {
-                val decoded = tryDecodeBase64(content)
-                if (decoded.contains("vless://", ignoreCase = true)) {
-                    MmkvManager.encodeSettings("ruroa_cached_sub", decoded)
-                    return decoded
+            withContext(Dispatchers.Main) {
+                nodes = tested
+                currentIndex = 0
+                renderServerList()
+                if (autoConnect && nodes.isNotEmpty()) {
+                    startVpnFlow()
+                } else if (nodes.isEmpty()) {
+                    isConnecting = false
+                    updateUiState()
+                    tvServer.text = "Нет доступных узлов"
                 }
             }
         }
-        return MmkvManager.decodeSettingsString("ruroa_cached_sub")
     }
-
-    private fun downloadText(urlStr: String): String? {
+    private fun fetchSubscriptionLines(): List<String> {
+        val prefs = getSharedPreferences("ruroa_cache", MODE_PRIVATE)
+        val urls = listOf(RuroaNative.getPrimarySubUrl(), RuroaNative.getCdnSubUrl())
+        for (u in urls) {
+            try {
+                val conn = (URL(u).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                }
+                if (conn.responseCode == 200) {
+                    val body = conn.inputStream.bufferedReader().readText().trim()
+                    val decoded = String(Base64.decode(body, Base64.DEFAULT))
+                    val lines = decoded.lines().map { it.trim() }.filter { it.startsWith("vless://") }
+                    if (lines.isNotEmpty()) {
+                        prefs.edit().putString("sub_b64", body).apply()
+                        return lines
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        val cached = prefs.getString("sub_b64", null) ?: return emptyList()
         return try {
-            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4500
-                readTimeout = 4500
-                setRequestProperty("User-Agent", "Ruroa/1.1")
-            }
-            if (conn.responseCode == 200) {
-                conn.inputStream.bufferedReader().use { it.readText().trim() }
-            } else {
-                null
-            }
+            String(Base64.decode(cached, Base64.DEFAULT))
+                .lines().map { it.trim() }.filter { it.startsWith("vless://") }
         } catch (_: Exception) {
-            null
+            emptyList()
         }
     }
 
-    private fun tryDecodeBase64(raw: String): String {
-        val clean = raw.trim()
-        if (clean.contains("vless://")) return clean
+    private fun measureTcpPing(vlessUri: String): Int {
         return try {
-            val bytes = Base64.decode(clean, Base64.DEFAULT)
-            String(bytes, Charsets.UTF_8)
+            val atPart = vlessUri.substringAfter("@").substringBefore("?").substringBefore("#")
+            val host = atPart.substringBefore(":")
+            val port = atPart.substringAfter(":").toIntOrNull() ?: 443
+            val start = System.currentTimeMillis()
+            Socket().use { s ->
+                s.connect(InetSocketAddress(host, port), 1200)
+            }
+            (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
         } catch (_: Exception) {
-            clean
+            -1
         }
     }
 
-    @SuppressLint("SetTextI18n")
-    private fun updateUiState(connected: Boolean, serverName: String? = null) {
-        if (connected) {
-            btnConnect.text = "ОТКЛЮЧИТЬ"
-            btnConnect.background = createCircleDrawable("#0F291E", "#238636", dp(3))
-            tvStatusTitle.text = "Защита активна"
-            tvStatusTitle.setTextColor(Color.parseColor("#3FB950"))
-            tvStatusSub.text = serverName ?: "Оптимальный маршрут"
-            tvStatusSub.maxLines = 1
-            tvStatusSub.ellipsize = TextUtils.TruncateAt.END
-            btnSwitchServer.visibility = View.VISIBLE
+    private fun parseNodeTitle(vlessUri: String): String {
+        val tag = vlessUri.substringAfter("#", "").trim()
+        return if (tag.isNotEmpty()) {
+            try {
+                java.net.URLDecoder.decode(tag, "UTF-8")
+            } catch (_: Exception) {
+                tag
+            }
         } else {
-            btnConnect.text = "ПОДКЛЮЧИТЬ"
-            btnConnect.background = createCircleDrawable("#161B22", "#30363D", dp(3))
-            tvStatusTitle.text = "Защита отключена"
-            tvStatusTitle.setTextColor(Color.parseColor("#8B949E"))
-            tvStatusSub.text = "Нажмите кнопку для безопасного соединения"
-            btnSwitchServer.visibility = View.GONE
+            vlessUri.substringAfter("@").substringBefore(":")
         }
+    }
+
+    private fun renderServerList() {
+        listContainer.removeAllViews()
+        val active = nodes.getOrNull(currentIndex)
+        tvServer.text = if (active != null) {
+            "${active.title} • ${active.pingMs} мс"
+        } else {
+            "Сервер не выбран"
+        }
+        nodes.forEachIndexed { idx, node ->
+            val selected = idx == currentIndex
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = roundBg(if (selected) "#1F6FEB" else "#161B22", 10)
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                setOnClickListener {
+                    currentIndex = idx
+                    renderServerList()
+                    if (isConnected) {
+                        stopVpnService()
+                        startVpnFlow()
+                    }
+                }
+            }
+            val tvName = TextView(this).apply {
+                text = node.title
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                maxLines = 1
+            }
+            val tvPing = TextView(this).apply {
+                text = "${node.pingMs} мс"
+                setTextColor(
+                    when {
+                        selected -> Color.WHITE
+                        node.pingMs < 120 -> Color.parseColor("#3FB950")
+                        node.pingMs < 250 -> Color.parseColor("#D29922")
+                        else -> Color.parseColor("#F85149")
+                    }
+                )
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            item.addView(tvName, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            item.addView(tvPing)
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+            listContainer.addView(item, lp)
+        }
+    }
+
+    private fun updateUiState() {
+        when {
+            isConnecting -> {
+                btnConnect.text = "ПОДКЛЮЧЕНИЕ..."
+                btnConnect.background = roundBg("#9E6A03", 16)
+                tvStatus.text = "Установка защищённого соединения..."
+            }
+            isConnected -> {
+                btnConnect.text = "ОТКЛЮЧИТЬ"
+                btnConnect.background = roundBg("#238636", 16)
+                tvStatus.text = "Защищено • DoH 1.1.1.1"
+            }
+            else -> {
+                btnConnect.text = "ПОДКЛЮЧИТЬ"
+                btnConnect.background = roundBg("#1F6FEB", 16)
+                tvStatus.text = "Отключено"
+            }
+        }
+    }
+
+    private fun ensureGeoAssets() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            listOf("geoip.dat", "geosite.dat").forEach { name ->
+                try {
+                    val outFile = File(filesDir, name)
+                    if (!outFile.exists()) {
+                        assets.open(name).use { input ->
+                            outFile.outputStream().use { output -> input.copyTo(output) }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun setupRussianBypassOnce() {
+        val prefs = getSharedPreferences("ruroa_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("bypass_init_v2", false)) return
+        val bypassPkgs = setOf(
+            "ru.sberbankmobile", "com.idamob.tinkoff.android", "ru.vtb24.mobilebanking.android",
+            "ru.alfabank.mobile.android", "ru.gazprombank.android.mobilebank.app",
+            "ru.raiffeisennews", "ru.ozon.app.android", "com.wildberries.ru",
+            "ru.rostel", "ru.gosuslugi.pos", "ru.yandex.taxi", "ru.beru.android"
+        )
+        MmkvManager.encodeSettings(AppConfig.PREF_PER_APP_PROXY, true)
+        MmkvManager.encodeSettings(AppConfig.PREF_BYPASS_APPS, true)
+        MmkvManager.encodeSettings(AppConfig.PREF_PER_APP_PROXY_SET, bypassPkgs)
+        prefs.edit().putBoolean("bypass_init_v2", true).apply()
     }
 
     private fun shareApkFile() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val baseDir = externalCacheDir ?: filesDir
-                val outApk = File(baseDir, "Ruroa.apk")
-                File(applicationInfo.sourceDir).copyTo(outApk, overwrite = true)
-                val uri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", outApk)
-                withContext(Dispatchers.Main) {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "application/vnd.android.package-archive"
-                        putExtra(Intent.EXTRA_STREAM, uri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    startActivity(Intent.createChooser(intent, "Поделиться Ruroa.apk"))
-                }
-            } catch (_: Exception) {
+        try {
+            val srcPath = applicationInfo.publicSourceDir ?: applicationInfo.sourceDir
+            val srcApk = File(srcPath)
+            if (!srcApk.exists()) {
+                Toast.makeText(this, "Файл установки не найден", Toast.LENGTH_SHORT).show()
+                return
             }
+            val dir = externalCacheDir ?: cacheDir
+            val outApk = File(dir, "Ruroa.apk")
+            srcApk.inputStream().use { input ->
+                outApk.outputStream().use { output -> input.copyTo(output) }
+            }
+            val uri: Uri = FileProvider.getUriForFile(this, "${packageName}.cache", outApk)
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/vnd.android.package-archive"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(sendIntent, "Отправить Ruroa.apk"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Не удалось отправить APK: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun createCircleDrawable(fillHex: String, strokeHex: String, strokePx: Int): GradientDrawable {
+    private fun roundBg(hex: String, radiusDp: Int): GradientDrawable {
         return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            color = ColorStateList.valueOf(Color.parseColor(fillHex))
-            setStroke(strokePx, Color.parseColor(strokeHex))
-        }
-    }
-
-    private fun createRoundRectDrawable(fillHex: String, strokeHex: String, strokePx: Int, radiusPx: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = radiusPx.toFloat()
-            color = ColorStateList.valueOf(Color.parseColor(fillHex))
-            setStroke(strokePx, Color.parseColor(strokeHex))
+            setColor(Color.parseColor(hex))
+            cornerRadius = dp(radiusDp).toFloat()
         }
     }
 
