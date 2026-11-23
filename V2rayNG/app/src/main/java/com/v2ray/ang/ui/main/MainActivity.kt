@@ -98,10 +98,6 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!RuroaNative.verifyEnvironment(this)) {
-            finish()
-            return
-        }
         setupRussianBypassOnce()
         ensureGeoAssets()
         buildUi()
