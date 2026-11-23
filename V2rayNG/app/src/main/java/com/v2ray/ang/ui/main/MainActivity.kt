@@ -1,7 +1,10 @@
 package com.v2ray.ang.ui.main
 
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -37,6 +40,7 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
+import java.net.URLDecoder
 
 class MainActivity : AppCompatActivity() {
 
@@ -103,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         buildUi()
         val filter = IntentFilter(AppConfig.BROADCAST_ACTION_ACTIVITY)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(stateReceiver, filter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(stateReceiver, filter, RECEIVER_EXPORTED)
         } else {
             registerReceiver(stateReceiver, filter)
         }
@@ -261,7 +265,9 @@ class MainActivity : AppCompatActivity() {
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
                 withContext(Dispatchers.Main) {
-                    val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java)
+                    val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java).apply {
+                        action = AppConfig.ACTION_START
+                    }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(svcIntent)
                     } else {
@@ -282,6 +288,13 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         isConnecting = false
         updateUiState()
+        try {
+            val stopIntent = Intent(this, CoreVpnService::class.java).apply {
+                action = AppConfig.ACTION_STOP
+            }
+            startService(stopIntent)
+        } catch (_: Exception) {
+        }
         sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
             `package` = packageName
             putExtra("key", AppConfig.MSG_STATE_STOP)
@@ -373,17 +386,58 @@ class MainActivity : AppCompatActivity() {
 
     private fun parseNodeTitle(vlessUri: String): String {
         val tag = vlessUri.substringAfter("#", "").trim()
-        return if (tag.isNotEmpty()) {
+        val raw = if (tag.isNotEmpty()) {
             try {
-                java.net.URLDecoder.decode(tag, "UTF-8")
+                URLDecoder.decode(tag, "UTF-8")
             } catch (_: Exception) {
                 tag
             }
         } else {
             vlessUri.substringAfter("@").substringBefore(":")
         }
+        return raw.replace(Regex("""\s*[•|-]?\s*\d+\s*m[sс]\b""", RegexOption.IGNORE_CASE), "").trim()
     }
 
+    private fun showNodeInfoDialog(node: ServerNode) {
+        val uri = node.rawUri
+        val hostPort = uri.substringAfter("@").substringBefore("?").substringBefore("#")
+        val query = uri.substringAfter("?", "").substringBefore("#")
+        val params = query.split("&").mapNotNull {
+            val idx = it.indexOf('=')
+            if (idx > 0) it.substring(0, idx) to it.substring(idx + 1) else null
+        }.toMap()
+        val security = params["security"] ?: "none"
+        val type = params["type"] ?: "tcp"
+        val sni = params["sni"] ?: params["host"] ?: "не указан"
+        val fp = params["fp"] ?: "по умолчанию"
+        val pbk = params["pbk"]
+        val protoLabel = when {
+            security.equals("reality", true) -> "VLESS + Reality ($type)"
+            security.equals("tls", true) -> "VLESS + TLS ($type)"
+            else -> "VLESS ($type / $security)"
+        }
+        val details = buildString {
+            appendLine("Узел: ${node.title}")
+            appendLine("Адрес: $hostPort")
+            appendLine("Протокол: $protoLabel")
+            appendLine("Маскировка (SNI): $sni")
+            appendLine("Отпечаток (FP): $fp")
+            if (!pbk.isNullOrEmpty()) {
+                appendLine("Public Key: ${pbk.take(12)}...")
+            }
+            append("Пинг с устройства: ${node.pingMs} мс")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Информация о ключе")
+            .setMessage(details)
+            .setPositiveButton("Скопировать ключ") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("Ruroa VLESS", uri))
+                Toast.makeText(this, "Ключ скопирован в буфер", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
     private fun renderServerList() {
         listContainer.removeAllViews()
         val active = nodes.getOrNull(currentIndex)
@@ -398,7 +452,7 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 background = roundBg(if (selected) "#1F6FEB" else "#161B22", 10)
-                setPadding(dp(14), dp(12), dp(14), dp(12))
+                setPadding(dp(14), dp(10), dp(10), dp(10))
                 setOnClickListener {
                     currentIndex = idx
                     renderServerList()
@@ -426,9 +480,20 @@ class MainActivity : AppCompatActivity() {
                 )
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 typeface = Typeface.DEFAULT_BOLD
+                setPadding(dp(8), 0, dp(8), 0)
+            }
+            val btnInfo = TextView(this).apply {
+                text = "ⓘ"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                gravity = Gravity.CENTER
+                background = roundBg(if (selected) "#1158C7" else "#21262D", 8)
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                setOnClickListener { showNodeInfoDialog(node) }
             }
             item.addView(tvName, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             item.addView(tvPing)
+            item.addView(btnInfo)
             val lp = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -450,6 +515,7 @@ class MainActivity : AppCompatActivity() {
                 tvStatus.text = "Защищено • DoH 1.1.1.1"
             }
             else -> {
+                btnConnect.text = "ПОДКЛЮЧЕНИЕ"
                 btnConnect.text = "ПОДКЛЮЧИТЬ"
                 btnConnect.background = roundBg("#1F6FEB", 16)
                 tvStatus.text = "Отключено"
@@ -496,8 +562,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Файл установки не найден", Toast.LENGTH_SHORT).show()
                 return
             }
-            val dir = externalCacheDir ?: cacheDir
-            val outApk = File(dir, "Ruroa.apk")
+            val outApk = File(cacheDir, "Ruroa.apk")
             srcApk.inputStream().use { input ->
                 outApk.outputStream().use { output -> input.copyTo(output) }
             }
