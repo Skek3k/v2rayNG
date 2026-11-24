@@ -27,7 +27,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.v2ray.ang.AppConfig
-import com.v2ray.ang.handler.LauncherManager
+import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
 import kotlinx.coroutines.Dispatchers
@@ -265,9 +265,9 @@ class MainActivity : AppCompatActivity() {
                 MmkvManager.setSelectServer(guid)
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
-                MmkvManager.encodeSettings(AppConfig.PREF_MODE, "VPN")
+                MmkvManager.encodeSettings(AppConfig.PREF_MODE, AppConfig.VPN)
                 withContext(Dispatchers.Main) {
-                    LauncherManager(this@MainActivity).startCoreService()
+                    LauncherManager.startService(this@MainActivity, guid)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -283,7 +283,7 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         isConnecting = false
         updateUiState()
-        LauncherManager(this).stopCoreService()
+        LauncherManager.stopService(this)
     }
 
     private fun switchBestNode() {
