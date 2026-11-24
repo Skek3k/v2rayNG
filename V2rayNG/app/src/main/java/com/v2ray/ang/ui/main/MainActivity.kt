@@ -265,8 +265,9 @@ class MainActivity : AppCompatActivity() {
                 MmkvManager.setSelectServer(guid)
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
-                                withContext(Dispatchers.Main) {
-                                        LauncherManager(this@MainActivity).startCoreService()
+                MmkvManager.encodeSettings(AppConfig.PREF_MODE, "VPN")
+                withContext(Dispatchers.Main) {
+                    LauncherManager(this@MainActivity).startCoreService()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -282,7 +283,7 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         isConnecting = false
         updateUiState()
-                LauncherManager(this).stopCoreService()
+        LauncherManager(this).stopCoreService()
     }
 
     private fun switchBestNode() {
