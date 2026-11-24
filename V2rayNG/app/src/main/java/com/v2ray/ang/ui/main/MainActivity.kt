@@ -265,13 +265,8 @@ class MainActivity : AppCompatActivity() {
                 MmkvManager.setSelectServer(guid)
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
-                withContext(Dispatchers.Main) {
-                    val started = LauncherManager.startVService(this@MainActivity)
-                    if (!started) {
-                        isConnecting = false
-                        updateUiState()
-                        Toast.makeText(this@MainActivity, "Не удалось запустить службу VPN", Toast.LENGTH_SHORT).show()
-                    }
+                                withContext(Dispatchers.Main) {
+                    LauncherManager.startCoreService(this@MainActivity)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -287,7 +282,7 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         isConnecting = false
         updateUiState()
-        LauncherManager.stopVService(this)
+        LauncherManager.stopCoreService(this)
     }
 
     private fun switchBestNode() {
