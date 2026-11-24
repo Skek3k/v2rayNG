@@ -27,9 +27,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.v2ray.ang.AppConfig
+import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
-import com.v2ray.ang.service.CoreVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -253,26 +253,24 @@ class MainActivity : AppCompatActivity() {
                 MmkvManager.removeAllServer()
                 AngConfigManager.importBatchConfig(server = node.rawUri, subid = "", append = false)
                 val uuids = MmkvManager.decodeServerList("")
-                if (uuids.isEmpty()) {
+                val guid = uuids.firstOrNull()
+                if (guid == null || MmkvManager.decodeServerConfig(guid) == null) {
                     withContext(Dispatchers.Main) {
                         isConnecting = false
                         updateUiState()
-                        Toast.makeText(this@MainActivity, "Ошибка импорта узла", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@MainActivity, "Узел не поддерживается, выберите другой", Toast.LENGTH_SHORT).show()
                     }
                     return@launch
                 }
-                MmkvManager.setSelectServer(uuids.first())
+                MmkvManager.setSelectServer(guid)
                 val dohUrl = listOf("https://", "1.1.1.1", "/dns-query").joinToString("")
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
                 withContext(Dispatchers.Main) {
-                                        val svcIntent = Intent(this@MainActivity, CoreVpnService::class.java).apply {
-                        action = "${packageName}.action.start"
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(svcIntent)
-                    } else {
-                        startService(svcIntent)
+                    val started = LauncherManager.startVService(this@MainActivity)
+                    if (!started) {
+                        isConnecting = false
+                        updateUiState()
+                        Toast.makeText(this@MainActivity, "Не удалось запустить службу VPN", Toast.LENGTH_SHORT).show()
                     }
                 }
             } catch (e: Exception) {
@@ -289,18 +287,7 @@ class MainActivity : AppCompatActivity() {
         isConnected = false
         isConnecting = false
         updateUiState()
-        try {
-                        val stopIntent = Intent(this, CoreVpnService::class.java).apply {
-                action = "${packageName}.action.stop"
-            }
-
-            startService(stopIntent)
-        } catch (_: Exception) {
-        }
-        sendBroadcast(Intent(AppConfig.BROADCAST_ACTION_SERVICE).apply {
-            `package` = packageName
-            putExtra("key", AppConfig.MSG_STATE_STOP)
-        })
+        LauncherManager.stopVService(this)
     }
 
     private fun switchBestNode() {
@@ -517,7 +504,6 @@ class MainActivity : AppCompatActivity() {
                 tvStatus.text = "Защищено • DoH 1.1.1.1"
             }
             else -> {
-                btnConnect.text = "ПОДКЛЮЧЕНИЕ"
                 btnConnect.text = "ПОДКЛЮЧИТЬ"
                 btnConnect.background = roundBg("#1F6FEB", 16)
                 tvStatus.text = "Отключено"
