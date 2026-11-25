@@ -15,6 +15,7 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.text.TextUtils
 import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
@@ -31,8 +32,10 @@ import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -55,12 +58,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvServer: TextView
     private lateinit var btnSwitch: TextView
     private lateinit var btnShare: TextView
+    private lateinit var btnRefreshList: TextView
     private lateinit var listContainer: LinearLayout
 
     private var isConnected = false
     private var isConnecting = false
+    private var pendingReconnect = false
+    private var refreshJob: Job? = null
     private var nodes: List<ServerNode> = emptyList()
     private var currentIndex = 0
+
     private val vpnPermLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { res ->
@@ -78,22 +85,31 @@ class MainActivity : AppCompatActivity() {
             when (key) {
                 AppConfig.MSG_STATE_RUNNING,
                 AppConfig.MSG_STATE_START_SUCCESS -> {
+                    pendingReconnect = false
                     isConnected = true
                     isConnecting = false
                     updateUiState()
                 }
-                AppConfig.MSG_STATE_STOP_SUCCESS,
+                AppConfig.MSG_STATE_STOP_SUCCESS -> {
+                    isConnected = false
+                    if (pendingReconnect) {
+                        pendingReconnect = false
+                        startVpnFlow()
+                        return
+                    }
+                    isConnecting = false
+                    updateUiState()
+                }
                 AppConfig.MSG_STATE_START_FAILURE -> {
+                    pendingReconnect = false
                     isConnected = false
                     isConnecting = false
                     updateUiState()
-                    if (key == AppConfig.MSG_STATE_START_FAILURE) {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Не удалось запустить узел, попробуйте другой",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Не удалось запустить узел, попробуйте другой",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
         }
@@ -115,12 +131,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        refreshJob?.cancel()
         try {
             unregisterReceiver(stateReceiver)
         } catch (_: Exception) {
         }
         super.onDestroy()
     }
+
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -175,17 +193,19 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
         }
         btnSwitch = TextView(this).apply {
-            text = "↻ Автовыбор"
+            text = "⇄ Сменить узел"
             setTextColor(Color.parseColor("#58A6FF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
             background = roundBg("#161B22", 10)
             setPadding(dp(14), dp(10), dp(14), dp(10))
-            setOnClickListener { switchBestNode() }
+            setOnClickListener { switchNextNode() }
         }
         btnShare = TextView(this).apply {
             text = "Поделиться APK"
             setTextColor(Color.parseColor("#C9D1D9"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
             background = roundBg("#161B22", 10)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             setOnClickListener { shareApkFile() }
@@ -198,13 +218,27 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(16), 0, dp(8))
+        }
         val listHeader = TextView(this).apply {
             text = "Доступные серверы (по пингу)"
             setTextColor(Color.parseColor("#8B949E"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(16), 0, dp(8))
         }
-        root.addView(listHeader, LinearLayout.LayoutParams(
+        btnRefreshList = TextView(this).apply {
+            text = "↻ Обновить"
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(8), dp(4), dp(4), dp(4))
+            setOnClickListener { refreshServers(autoConnect = false) }
+        }
+        headerRow.addView(listHeader, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        headerRow.addView(btnRefreshList)
+        root.addView(headerRow, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
@@ -222,6 +256,7 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(root)
     }
+
     private fun onConnectClicked() {
         if (isConnecting) return
         if (isConnected) {
@@ -236,6 +271,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVpnFlow() {
+        if (nodes.getOrNull(currentIndex) == null) {
+            isConnecting = false
+            updateUiState()
+            Toast.makeText(this, "Сначала выберите доступный узел", Toast.LENGTH_SHORT).show()
+            return
+        }
         isConnecting = true
         updateUiState()
         val intent = VpnService.prepare(this)
@@ -247,7 +288,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchSelectedNode() {
-        val node = nodes.getOrNull(currentIndex) ?: return
+        val node = nodes.getOrNull(currentIndex)
+        if (node == null) {
+            isConnecting = false
+            updateUiState()
+            return
+        }
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 MmkvManager.removeAllServer()
@@ -280,13 +326,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopVpnService() {
+        pendingReconnect = false
         isConnected = false
         isConnecting = false
         updateUiState()
         LauncherManager.stopService(this)
     }
 
-    private fun switchBestNode() {
+    private fun reconnectToSelectedNode() {
+        pendingReconnect = true
+        isConnected = false
+        isConnecting = true
+        updateUiState()
+        LauncherManager.stopService(this)
+        lifecycleScope.launch {
+            delay(1500)
+            if (pendingReconnect) {
+                pendingReconnect = false
+                startVpnFlow()
+            }
+        }
+    }
+
+    private fun switchNextNode() {
+        if (isConnecting) return
         if (nodes.isEmpty()) {
             refreshServers(autoConnect = isConnected)
             return
@@ -294,25 +357,42 @@ class MainActivity : AppCompatActivity() {
         currentIndex = (currentIndex + 1) % nodes.size
         renderServerList()
         if (isConnected) {
-            stopVpnService()
-            startVpnFlow()
+            reconnectToSelectedNode()
         }
     }
 
     private fun refreshServers(autoConnect: Boolean) {
+        refreshJob?.cancel()
         tvServer.text = "Поиск быстрых серверов..."
-        lifecycleScope.launch(Dispatchers.IO) {
-            val rawLines = fetchSubscriptionLines()
-            val tested = rawLines.take(30).map { line ->
-                async {
-                    val ms = measureTcpPing(line)
-                    if (ms in 1..1500) ServerNode(line, parseNodeTitle(line), ms) else null
-                }
-            }.awaitAll().filterNotNull().sortedBy { it.pingMs }
+        btnRefreshList.isEnabled = false
+        btnRefreshList.text = "Поиск..."
 
+        refreshJob = lifecycleScope.launch(Dispatchers.IO) {
+            val rawLines = fetchSubscriptionLines()
+            val liveNodes = mutableListOf<ServerNode>()
+            val chunks = rawLines.take(125).chunked(25)
+            for (batch in chunks) {
+                val batchRes = batch.map { line ->
+                    async {
+                        val ms = measureTcpPing(line)
+                        if (ms in 1..1500) ServerNode(line, parseNodeTitle(line), ms) else null
+                    }
+                }.awaitAll().filterNotNull()
+                liveNodes.addAll(batchRes)
+                if (liveNodes.size >= 15) break
+            }
+
+            val sorted = liveNodes.sortedBy { it.pingMs }
             withContext(Dispatchers.Main) {
-                nodes = tested
-                currentIndex = 0
+                btnRefreshList.isEnabled = true
+                btnRefreshList.text = "↻ Обновить"
+                val prevUri = nodes.getOrNull(currentIndex)?.rawUri
+                nodes = sorted
+                currentIndex = if (prevUri != null && !autoConnect) {
+                    nodes.indexOfFirst { it.rawUri == prevUri }.takeIf { it >= 0 } ?: 0
+                } else {
+                    0
+                }
                 renderServerList()
                 if (autoConnect && nodes.isNotEmpty()) {
                     startVpnFlow()
@@ -324,41 +404,75 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
     private fun fetchSubscriptionLines(): List<String> {
         val prefs = getSharedPreferences("ruroa_cache", MODE_PRIVATE)
         val urls = listOf(RuroaNative.getPrimarySubUrl(), RuroaNative.getCdnSubUrl())
         for (u in urls) {
+            var conn: HttpURLConnection? = null
             try {
-                val conn = (URL(u).openConnection() as HttpURLConnection).apply {
+                conn = (URL(u).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5000
                     readTimeout = 5000
                 }
                 if (conn.responseCode == 200) {
                     val body = conn.inputStream.bufferedReader().readText().trim()
-                    val decoded = String(Base64.decode(body, Base64.DEFAULT))
-                    val lines = decoded.lines().map { it.trim() }.filter { it.startsWith("vless://") }
+                    val lines = decodeSubscriptionBody(body)
                     if (lines.isNotEmpty()) {
                         prefs.edit().putString("sub_b64", body).apply()
                         return lines
                     }
                 }
             } catch (_: Exception) {
+            } finally {
+                conn?.disconnect()
             }
         }
         val cached = prefs.getString("sub_b64", null) ?: return emptyList()
-        return try {
-            String(Base64.decode(cached, Base64.DEFAULT))
-                .lines().map { it.trim() }.filter { it.startsWith("vless://") }
-        } catch (_: Exception) {
-            emptyList()
+        return decodeSubscriptionBody(cached)
+    }
+
+    private fun decodeSubscriptionBody(body: String): List<String> {
+        if (body.isBlank()) return emptyList()
+        if (body.contains("vless://")) {
+            return body.lines().map { it.trim() }.filter { it.startsWith("vless://") }.distinct()
+        }
+        val cleaned = body.replace("\n", "").replace("\r", "").trim()
+        for (flags in listOf(Base64.DEFAULT, Base64.URL_SAFE)) {
+            try {
+                val decoded = String(Base64.decode(cleaned, flags))
+                val lines = decoded.lines().map { it.trim() }.filter { it.startsWith("vless://") }.distinct()
+                if (lines.isNotEmpty()) return lines
+            } catch (_: Exception) {
+            }
+        }
+        return emptyList()
+    }
+
+    private fun extractHostPort(vlessUri: String): Pair<String, Int>? {
+        val atPart = vlessUri.substringAfter("@", "").substringBefore("?").substringBefore("#").trim()
+        if (atPart.isEmpty()) return null
+        return if (atPart.startsWith("[")) {
+            val closeIdx = atPart.indexOf(']')
+            if (closeIdx <= 1) return null
+            val host = atPart.substring(1, closeIdx)
+            val portPart = atPart.substring(closeIdx + 1).removePrefix(":")
+            host to (portPart.toIntOrNull() ?: 443)
+        } else {
+            val colonIdx = atPart.lastIndexOf(':')
+            if (colonIdx > 0) {
+                val host = atPart.substring(0, colonIdx)
+                val port = atPart.substring(colonIdx + 1).toIntOrNull() ?: 443
+                host to port
+            } else {
+                atPart to 443
+            }
         }
     }
 
     private fun measureTcpPing(vlessUri: String): Int {
         return try {
-            val atPart = vlessUri.substringAfter("@").substringBefore("?").substringBefore("#")
-            val host = atPart.substringBefore(":")
-            val port = atPart.substringAfter(":").toIntOrNull() ?: 443
+            val (host, port) = extractHostPort(vlessUri) ?: return -1
             val start = System.currentTimeMillis()
             Socket().use { s ->
                 s.connect(InetSocketAddress(host, port), 1200)
@@ -378,7 +492,7 @@ class MainActivity : AppCompatActivity() {
                 tag
             }
         } else {
-            vlessUri.substringAfter("@").substringBefore(":")
+            extractHostPort(vlessUri)?.first ?: "RUROA"
         }
         return raw.replace(Regex("""\s*[•|-]?\s*\d+\s*m[sс]\b""", RegexOption.IGNORE_CASE), "").trim()
     }
@@ -423,6 +537,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Закрыть", null)
             .show()
     }
+
     private fun renderServerList() {
         listContainer.removeAllViews()
         val active = nodes.getOrNull(currentIndex)
@@ -439,11 +554,11 @@ class MainActivity : AppCompatActivity() {
                 background = roundBg(if (selected) "#1F6FEB" else "#161B22", 10)
                 setPadding(dp(14), dp(10), dp(10), dp(10))
                 setOnClickListener {
+                    if (isConnecting || currentIndex == idx) return@setOnClickListener
                     currentIndex = idx
                     renderServerList()
                     if (isConnected) {
-                        stopVpnService()
-                        startVpnFlow()
+                        reconnectToSelectedNode()
                     }
                 }
             }
@@ -452,6 +567,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
             }
             val tvPing = TextView(this).apply {
                 text = "${node.pingMs} мс"
