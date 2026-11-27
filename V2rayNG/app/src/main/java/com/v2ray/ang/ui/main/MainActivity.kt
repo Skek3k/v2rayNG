@@ -1,5 +1,6 @@
 package com.v2ray.ang.ui.main
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
@@ -8,6 +9,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -25,12 +27,14 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.core.LauncherManager
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.MmkvManager
+import com.v2ray.ang.helper.MessageHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -65,8 +69,14 @@ class MainActivity : AppCompatActivity() {
     private var isConnecting = false
     private var pendingReconnect = false
     private var refreshJob: Job? = null
+    private var reconnectJob: Job? = null
+    private var connectTimeoutJob: Job? = null
     private var nodes: List<ServerNode> = emptyList()
     private var currentIndex = 0
+
+    private val notifPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
 
     private val vpnPermLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -74,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         if (res.resultCode == RESULT_OK) {
             launchSelectedNode()
         } else {
+            connectTimeoutJob?.cancel()
             isConnecting = false
             updateUiState()
         }
@@ -85,15 +96,25 @@ class MainActivity : AppCompatActivity() {
             when (key) {
                 AppConfig.MSG_STATE_RUNNING,
                 AppConfig.MSG_STATE_START_SUCCESS -> {
+                    connectTimeoutJob?.cancel()
+                    reconnectJob?.cancel()
                     pendingReconnect = false
                     isConnected = true
                     isConnecting = false
                     updateUiState()
                 }
+                AppConfig.MSG_STATE_NOT_RUNNING -> {
+                    if (!isConnecting && !pendingReconnect) {
+                        isConnected = false
+                        updateUiState()
+                    }
+                }
                 AppConfig.MSG_STATE_STOP_SUCCESS -> {
+                    connectTimeoutJob?.cancel()
                     isConnected = false
                     if (pendingReconnect) {
                         pendingReconnect = false
+                        reconnectJob?.cancel()
                         startVpnFlow()
                         return
                     }
@@ -101,6 +122,8 @@ class MainActivity : AppCompatActivity() {
                     updateUiState()
                 }
                 AppConfig.MSG_STATE_START_FAILURE -> {
+                    connectTimeoutJob?.cancel()
+                    reconnectJob?.cancel()
                     pendingReconnect = false
                     isConnected = false
                     isConnecting = false
@@ -127,16 +150,36 @@ class MainActivity : AppCompatActivity() {
         } else {
             registerReceiver(stateReceiver, filter)
         }
+        requestNotificationPermissionIfNeeded()
         refreshServers(autoConnect = false)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!isConnecting && !pendingReconnect) {
+            MessageHelper.sendMsg2Service(this, AppConfig.MSG_REGISTER_CLIENT, "")
+        }
     }
 
     override fun onDestroy() {
         refreshJob?.cancel()
+        reconnectJob?.cancel()
+        connectTimeoutJob?.cancel()
         try {
             unregisterReceiver(stateReceiver)
         } catch (_: Exception) {
         }
         super.onDestroy()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     private fun buildUi() {
@@ -224,7 +267,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(16), 0, dp(8))
         }
         val listHeader = TextView(this).apply {
-            text = "Доступные серверы (по пингу)"
+            text = "Доступные серверы (Reality)"
             setTextColor(Color.parseColor("#8B949E"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         }
@@ -313,10 +356,12 @@ class MainActivity : AppCompatActivity() {
                 MmkvManager.encodeSettings(AppConfig.PREF_REMOTE_DNS, dohUrl)
                 MmkvManager.encodeSettings(AppConfig.PREF_MODE, AppConfig.VPN)
                 withContext(Dispatchers.Main) {
+                    startConnectTimeout()
                     LauncherManager.startService(this@MainActivity, guid)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
+                    connectTimeoutJob?.cancel()
                     isConnecting = false
                     updateUiState()
                     Toast.makeText(this@MainActivity, "Сбой запуска: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -325,7 +370,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun startConnectTimeout() {
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = lifecycleScope.launch {
+            delay(10000)
+            if (isConnecting) {
+                isConnecting = false
+                pendingReconnect = false
+                updateUiState()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Превышено время запуска VPN, попробуйте другой узел",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
     private fun stopVpnService() {
+        connectTimeoutJob?.cancel()
+        reconnectJob?.cancel()
         pendingReconnect = false
         isConnected = false
         isConnecting = false
@@ -334,12 +398,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun reconnectToSelectedNode() {
+        connectTimeoutJob?.cancel()
+        reconnectJob?.cancel()
         pendingReconnect = true
         isConnected = false
         isConnecting = true
         updateUiState()
         LauncherManager.stopService(this)
-        lifecycleScope.launch {
+        reconnectJob = lifecycleScope.launch {
             delay(1500)
             if (pendingReconnect) {
                 pendingReconnect = false
@@ -363,14 +429,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshServers(autoConnect: Boolean) {
         refreshJob?.cancel()
-        tvServer.text = "Поиск быстрых серверов..."
+        tvServer.text = "Поиск Reality-серверов..."
         btnRefreshList.isEnabled = false
         btnRefreshList.text = "Поиск..."
 
         refreshJob = lifecycleScope.launch(Dispatchers.IO) {
             val rawLines = fetchSubscriptionLines()
             val liveNodes = mutableListOf<ServerNode>()
-            val chunks = rawLines.take(125).chunked(25)
+            val chunks = rawLines.take(150).chunked(25)
             for (batch in chunks) {
                 val batchRes = batch.map { line ->
                     async {
@@ -379,7 +445,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }.awaitAll().filterNotNull()
                 liveNodes.addAll(batchRes)
-                if (liveNodes.size >= 15) break
+                if (liveNodes.size >= 20) break
             }
 
             val sorted = liveNodes.sortedBy { it.pingMs }
@@ -399,7 +465,7 @@ class MainActivity : AppCompatActivity() {
                 } else if (nodes.isEmpty()) {
                     isConnecting = false
                     updateUiState()
-                    tvServer.text = "Нет доступных узлов"
+                    tvServer.text = "Нет доступных Reality-узлов"
                 }
             }
         }
@@ -435,18 +501,38 @@ class MainActivity : AppCompatActivity() {
     private fun decodeSubscriptionBody(body: String): List<String> {
         if (body.isBlank()) return emptyList()
         if (body.contains("vless://")) {
-            return body.lines().map { it.trim() }.filter { it.startsWith("vless://") }.distinct()
+            return body.lines().map { it.trim() }.filter { isRealityUri(it) }.distinct()
         }
         val cleaned = body.replace("\n", "").replace("\r", "").trim()
         for (flags in listOf(Base64.DEFAULT, Base64.URL_SAFE)) {
             try {
                 val decoded = String(Base64.decode(cleaned, flags))
-                val lines = decoded.lines().map { it.trim() }.filter { it.startsWith("vless://") }.distinct()
+                val lines = decoded.lines().map { it.trim() }.filter { isRealityUri(it) }.distinct()
                 if (lines.isNotEmpty()) return lines
             } catch (_: Exception) {
             }
         }
         return emptyList()
+    }
+
+    private fun isRealityUri(uri: String): Boolean {
+        if (!uri.startsWith("vless://", ignoreCase = true)) return false
+        val query = uri.substringAfter("?", "").substringBefore("#")
+        if (query.isEmpty()) return false
+        var isReality = false
+        var hasPbk = false
+        for (part in query.split("&")) {
+            val idx = part.indexOf('=')
+            if (idx <= 0) continue
+            val key = part.substring(0, idx).trim().lowercase()
+            val value = part.substring(idx + 1).trim()
+            if (key == "security" && value.equals("reality", ignoreCase = true)) {
+                isReality = true
+            } else if (key == "pbk" && value.length >= 32) {
+                hasPbk = true
+            }
+        }
+        return isReality && hasPbk
     }
 
     private fun extractHostPort(vlessUri: String): Pair<String, Int>? {
@@ -505,20 +591,14 @@ class MainActivity : AppCompatActivity() {
             val idx = it.indexOf('=')
             if (idx > 0) it.substring(0, idx) to it.substring(idx + 1) else null
         }.toMap()
-        val security = params["security"] ?: "none"
         val type = params["type"] ?: "tcp"
         val sni = params["sni"] ?: params["host"] ?: "не указан"
         val fp = params["fp"] ?: "по умолчанию"
         val pbk = params["pbk"]
-        val protoLabel = when {
-            security.equals("reality", true) -> "VLESS + Reality ($type)"
-            security.equals("tls", true) -> "VLESS + TLS ($type)"
-            else -> "VLESS ($type / $security)"
-        }
         val details = buildString {
             appendLine("Узел: ${node.title}")
             appendLine("Адрес: $hostPort")
-            appendLine("Протокол: $protoLabel")
+            appendLine("Протокол: VLESS + Reality ($type)")
             appendLine("Маскировка (SNI): $sni")
             appendLine("Отпечаток (FP): $fp")
             if (!pbk.isNullOrEmpty()) {
